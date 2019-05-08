@@ -21,6 +21,7 @@ from __future__ import absolute_import
 from oslo_config import cfg
 from oslo_db.sqlalchemy import test_fixtures
 
+from placement.db import graph_db
 from placement.db.sqlalchemy import migration
 from placement import db_api as placement_db
 from placement import deploy
@@ -54,6 +55,9 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
         # Engine has **not** been associated with the global
         # context manager yet.
         migration.create_schema(engine)
+
+        # Clear the graph DB
+        graph_db.delete_all()
 
         # so, to work around that placement's setup code really wants to
         # use the enginefacade, we will patch the engine into it early.

@@ -16,6 +16,7 @@ from oslo_utils import encodeutils
 from oslo_utils import timeutils
 import webob
 
+from placement.db import graph_db as db
 from placement import exception
 from placement import microversion
 from placement.objects import resource_class as rc_obj
@@ -65,20 +66,30 @@ def create_resource_class(req):
     context.can(policies.CREATE)
     data = util.extract_json(req.body, schema.POST_RC_SCHEMA_V1_2)
 
-    try:
-        rc = rc_obj.ResourceClass(context, name=data['name'])
-        rc.create()
-    except exception.ResourceClassExists:
+    # Check that it doesn't exist yet. In the future we can add a constraint on
+    # the name attribute to ensure uniqueness, and get rid of this extra query.
+    new_name = data["name"]
+    query = """
+MATCH (rc:RESOURCE_CLASS {name: '%s'})
+RETURN rc
+""" % new_name
+    result = db.execute(query)
+    if result:
         raise webob.exc.HTTPConflict(
             'Conflicting resource class already exists: %(name)s' %
             {'name': data['name']})
-    except exception.MaxDBRetriesExceeded:
-        raise webob.exc.HTTPConflict(
-            'Max retries of DB transaction exceeded attempting '
-            'to create resource class: %(name)s, please '
-            'try again.' %
-            {'name': data['name']})
 
+    tm_now = timeutils.utcnow(with_timezone=True).strftime("%Y-%m-%d %H:%M:%S %Z")
+    query = """
+CREATE (rc:RESOURCE_CLASS {name: '%s', created_at: '%s', updated_at: '%s'})
+RETURN rc
+""" % (new_name, tm_now, tm_now)
+    result = db.execute(query)
+    if not result:
+        raise webob.exc.HTTPConflict("Failed to create resource class '%s'; "
+                "please try again" % new_name)
+
+    rc = db.pythonize(result[0]["rc"])
     req.response.location = util.resource_class_url(req.environ, rc)
     req.response.status = 201
     req.response.content_type = None
@@ -95,16 +106,12 @@ def delete_resource_class(req):
     name = util.wsgi_path_item(req.environ, 'name')
     context = req.environ['placement.context']
     context.can(policies.DELETE)
-    # The containing application will catch a not found here.
-    rc = rc_obj.ResourceClass.get_by_name(context, name)
-    try:
-        rc.destroy()
-    except exception.ResourceClassCannotDeleteStandard as exc:
-        raise webob.exc.HTTPBadRequest(
-            'Error in delete resource class: %(error)s' % {'error': exc})
-    except exception.ResourceClassInUse as exc:
-        raise webob.exc.HTTPConflict(
-            'Error in delete resource class: %(error)s' % {'error': exc})
+    query = """
+MATCH (rc:RESOURCE_CLASS {name: '%s'})
+WITH rc
+DELETE rc
+""" % name
+    db.execute(query)
     req.response.status = 204
     req.response.content_type = None
     return req.response
@@ -119,12 +126,23 @@ def get_resource_class(req):
     On success return a 200 with an application/json body representing
     the resource class.
     """
+
+    res = db.execute("MATCH (rc:RESOURCE_CLASS) RETURN count(rc) as cnt")
+    num = res[0]["cnt"]
+
     name = util.wsgi_path_item(req.environ, 'name')
     context = req.environ['placement.context']
     context.can(policies.SHOW)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     # The containing application will catch a not found here.
-    rc = rc_obj.ResourceClass.get_by_name(context, name)
+    query = """
+MATCH (rc:RESOURCE_CLASS {name: '%s'})
+RETURN rc
+""" % name
+    result = db.execute(query)
+    if not result:
+        raise exception.ResourceClassNotFound(resource_class=name)
+    rc = db.pythonize(result[0]["rc"])
 
     req.response.body = encodeutils.to_utf8(jsonutils.dumps(
         _serialize_resource_class(req.environ, rc))
@@ -152,7 +170,12 @@ def list_resource_classes(req):
     context = req.environ['placement.context']
     context.can(policies.LIST)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
-    rcs = rc_obj.get_all(context)
+    query = """
+MATCH (rc:RESOURCE_CLASS)
+RETURN rc
+"""
+    result = db.execute(query)
+    rcs = [db.pythonize(rec["rc"]) for rec in result]
 
     response = req.response
     output, last_modified = _serialize_resource_classes(
@@ -179,22 +202,18 @@ def update_resource_class(req):
     context.can(policies.UPDATE)
 
     data = util.extract_json(req.body, schema.PUT_RC_SCHEMA_V1_2)
+    new_name = data["name"]
 
-    # The containing application will catch a not found here.
-    rc = rc_obj.ResourceClass.get_by_name(context, name)
-
-    rc.name = data['name']
-
-    try:
-        rc.save()
-    except exception.ResourceClassExists:
-        raise webob.exc.HTTPConflict(
-            'Resource class already exists: %(name)s' %
-            {'name': rc.name})
-    except exception.ResourceClassCannotUpdateStandard:
-        raise webob.exc.HTTPBadRequest(
-            'Cannot update standard resource class %(rp_name)s' %
-            {'rp_name': name})
+    tm_now = timeutils.utcnow(with_timezone=True).strftime("%Y-%m-%d %H:%M:%S %Z")
+    query = """
+MATCH (rc:RESOURCE_CLASS {name: '%s'})
+SET rc.name = '%s', rc.updated_at = '%s'
+RETURN rc
+""" % (name, new_name, tm_now)
+    result = db.execute(query)
+    if not result:
+        raise exception.ResourceClassNotFound(resource_class=name)
+    rc = db.pythonize(result[0]["rc"])
 
     req.response.body = encodeutils.to_utf8(jsonutils.dumps(
         _serialize_resource_class(req.environ, rc))
@@ -220,19 +239,23 @@ def update_resource_class(req):
     # Use JSON validation to validation resource class name.
     util.extract_json('{"name": "%s"}' % name, schema.PUT_RC_SCHEMA_V1_2)
 
-    status = 204
-    try:
-        rc = rc_obj.ResourceClass.get_by_name(context, name)
-    except exception.NotFound:
-        try:
-            rc = rc_obj.ResourceClass(context, name=name)
-            rc.create()
-            status = 201
-        # We will not see ResourceClassCannotUpdateStandard because
-        # that was already caught when validating the {name}.
-        except exception.ResourceClassExists:
-            # Someone just now created the class, so stick with 204
-            pass
+    tm_now = timeutils.utcnow(with_timezone=True).strftime("%Y-%m-%d %H:%M:%S %Z")
+    xx = timeutils.utcnow(with_timezone=True)
+    query = """
+MATCH (rc:RESOURCE_CLASS {name: '%s'})
+RETURN rc
+""" % name
+    result = db.execute(query)
+    if result:
+        status = 204
+    else:
+        query = """
+CREATE (rc:RESOURCE_CLASS {name: '%s', created_at: '%s', updated_at: '%s'})
+RETURN rc
+""" % (name, tm_now, tm_now)
+        result = db.execute(query)
+        rc = db.pythonize(result[0]["rc"])
+        status = 201
 
     req.response.status = status
     req.response.content_type = None

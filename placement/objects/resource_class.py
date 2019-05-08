@@ -16,10 +16,12 @@ from oslo_concurrency import lockutils
 from oslo_db import api as oslo_db_api
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
+from oslo_utils import timeutils
 import six
 import sqlalchemy as sa
 from sqlalchemy import func
 
+from placement.db import graph_db as db   
 from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import exception
@@ -233,6 +235,16 @@ def _resource_classes_sync(ctx):
     batch_args = [{'name': six.text_type(name), 'id': index}
                   for index, name in enumerate(orc.STANDARDS)
                   if name not in db_classes]
+
+    tm_now = timeutils.utcnow(with_timezone=True).strftime("%Y-%m-%d %H:%M:%S %Z")
+    mrg = "MERGE (:RESOURCE_CLASS {name: '%s', updated_at: '%s', created_at: '%s'})"
+    merges = []
+    for arg in batch_args:
+        merges.append(mrg % (arg["name"], tm_now, tm_now))
+    merges.append("RETURN 1")
+    query = "\n".join(merges)
+    result = db.execute(query)
+
     ins = _RC_TBL.insert()
     if batch_args:
         conn = ctx.session.connection()
