@@ -20,6 +20,7 @@ from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import webob
 
+from placement.db import graph_db as db
 from placement import errors
 from placement import exception
 from placement import microversion
@@ -91,31 +92,31 @@ def create_resource_provider(req):
         schema = rp_schema.POST_RP_SCHEMA_V1_14
     data = util.extract_json(req.body, schema)
 
-    try:
-        if data.get('uuid'):
-            # Normalize UUID with no proper dashes into dashed one
-            # with format {8}-{4}-{4}-{4}-{12}
-            data['uuid'] = str(uuidlib.UUID(data['uuid']))
-        else:
-            data['uuid'] = uuidutils.generate_uuid()
+    if data.get('uuid'):
+        # Normalize UUID with no proper dashes into dashed one
+        # with format {8}-{4}-{4}-{4}-{12}
+        data['uuid'] = "'%s'" % uuidlib.UUID(data['uuid'])
+    else:
+        data['uuid'] = "'%s'" % uuidutils.generate_uuid()
+    data["generation"] = 0
 
-        resource_provider = rp_obj.ResourceProvider(context, **data)
-        resource_provider.create()
-    except db_exc.DBDuplicateEntry as exc:
-        # Whether exc.columns has one or two entries (in the event
-        # of both fields being duplicates) appears to be database
-        # dependent, so going with the complete solution here.
-        duplicate = ', '.join(
-            ['%s: %s' % (column, data[column]) for column in exc.columns])
-        raise webob.exc.HTTPConflict(
-            'Conflicting resource provider %(duplicate)s already exists.' %
-            {'duplicate': duplicate},
-            comment=errors.DUPLICATE_NAME)
-    except exception.ObjectActionError as exc:
-        raise webob.exc.HTTPBadRequest(
-            'Unable to create resource provider "%(name)s", %(rp_uuid)s: '
-            '%(error)s' %
-            {'name': data['name'], 'rp_uuid': data['uuid'], 'error': exc})
+    data_args = ", ".join(["%s: %s" % (k, v) for k, v in data.items()])
+    query = """
+CREATE (rp:RESOURCE_PROVIDER {%s})
+RETURN rp
+""" % data_args
+    try:
+        result = db.execute(query)
+    except db.ClientError as e:
+        if "ConstraintValidationFailed" in str(e):
+            if "property `uuid`" in str(e):
+                duplicate = "uuid: %s" % data.get("uuid")
+            else:
+                duplicate = "name: %s" % data.get("name")
+            raise webob.exc.HTTPConflict("Conflicting resource provider "
+                    "%(duplicate)s already exists." % {'duplicate': duplicate},
+                    comment=errors.DUPLICATE_NAME)
+    resource_provider = db.pythonize(result[0]["rp"])
 
     req.response.location = util.resource_provider_url(
         req.environ, resource_provider)

@@ -58,6 +58,18 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
 
         # Clear the graph DB
         graph_db.delete_all()
+        # Create the constraints. Eventually this should be moved to somewhere
+        # higher-level, but for now this is good enough for tests.
+        constraints = [
+                "CREATE CONSTRAINT ON (rp:RESOURCE_PROVIDER) ASSERT rp.uuid "
+                    "IS UNIQUE",
+                "CREATE CONSTRAINT ON (rp:RESOURCE_PROVIDER) ASSERT rp.name "
+                    "IS UNIQUE",
+                "CREATE CONSTRAINT ON (rc:RESOURCE_CLASS) ASSERT rc.name "
+                    "IS UNIQUE",
+        ]
+        for constraint in constraints:
+            graph_db.execute(constraint)
 
         # so, to work around that placement's setup code really wants to
         # use the enginefacade, we will patch the engine into it early.

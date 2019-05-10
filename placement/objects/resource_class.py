@@ -21,7 +21,7 @@ import six
 import sqlalchemy as sa
 from sqlalchemy import func
 
-from placement.db import graph_db as db   
+from placement.db import graph_db as db
 from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import exception
@@ -226,6 +226,10 @@ def get_all(context):
 @db_api.placement_context_manager.writer
 def _resource_classes_sync(ctx):
     # Create a set of all resource class in the os_resource_classes library.
+    query = "MATCH (rc:RESOURCE_CLASS) RETURN rc.name AS name"
+    result = db.execute(query)
+    gdb_classes = [res["name"] for res in result]
+
     sel = sa.select([_RC_TBL.c.name])
     res = ctx.session.execute(sel).fetchall()
     db_classes = [r[0] for r in res if not orc.is_custom(r[0])]
@@ -235,11 +239,14 @@ def _resource_classes_sync(ctx):
     batch_args = [{'name': six.text_type(name), 'id': index}
                   for index, name in enumerate(orc.STANDARDS)
                   if name not in db_classes]
+    gbatch_args = [{'name': six.text_type(name), 'id': index}
+                  for index, name in enumerate(orc.STANDARDS)
+                  if name not in gdb_classes]
 
     tm_now = timeutils.utcnow(with_timezone=True).strftime("%Y-%m-%d %H:%M:%S %Z")
     mrg = "MERGE (:RESOURCE_CLASS {name: '%s', updated_at: '%s', created_at: '%s'})"
     merges = []
-    for arg in batch_args:
+    for arg in gbatch_args:
         merges.append(mrg % (arg["name"], tm_now, tm_now))
     merges.append("RETURN 1")
     query = "\n".join(merges)

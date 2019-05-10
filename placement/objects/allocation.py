@@ -17,6 +17,7 @@ from oslo_log import log as logging
 import sqlalchemy as sa
 from sqlalchemy import sql
 
+from placement.db import graph_db as db
 from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import exception

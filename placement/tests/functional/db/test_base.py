@@ -17,6 +17,7 @@ import os_resource_classes as orc
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 
+from placement.db import graph_db as db
 from placement import exception
 from placement.objects import allocation as alloc_obj
 from placement.objects import consumer as consumer_obj
@@ -48,11 +49,46 @@ DISK_ALLOCATION = dict(
 def create_provider(context, name, *aggs, **kwargs):
     parent = kwargs.get('parent')
     uuid = kwargs.get('uuid', getattr(uuids, name))
-    rp = rp_obj.ResourceProvider(context, name=name, uuid=uuid)
+
+    query = """
+            CREATE (rp:RESOURCE_PROVIDER {name: '%s', uuid: '%s',
+                generation: 0, created_at: timestamp(),
+                updated_at: timestamp()})
+            RETURN rp
+            """ % (name, uuid)
+    try:
+        result = db.execute(query)
+    except db.ClientError as e:
+        if "ConstraintValidationFailed" in str(e):
+            if "property `uuid`" in str(e):
+                duplicate = "uuid: %s" % data.get("uuid")
+            else:
+                duplicate = "name: %s" % data.get("name")
+            raise webob.exc.HTTPConflict("Conflicting resource provider "
+                    "%(duplicate)s already exists." % {'duplicate': duplicate},
+                    comment=errors.DUPLICATE_NAME)
+    rp = db.pythonize(result[0]["rp"])
+    rp._context = context
     if parent:
-        rp.parent_provider_uuid = parent
-    rp.create()
+        query = """
+                MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
+                RETURN parent
+                """ % (uuid, parent)
+        result = db.execute(query)
+
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+                MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
+                WITH rp, parent
+                CREATE (parent)-[:PROVIDES]->(rp)
+                RETURN parent
+                """ % (uuid, parent)
+        result = db.execute(query)
+
     if aggs:
+
+        import pudb
+        pudb.set_trace()
         rp.set_aggregates(aggs)
     return rp
 
