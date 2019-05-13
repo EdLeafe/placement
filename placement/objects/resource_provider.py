@@ -95,7 +95,7 @@ def has_allocations(self, rp, rcs=None):
     query = """
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-->(inv)<-[:USES]-(cs)
             RETURN labels(inv)[0] AS rc
-            """
+            """ % rp.uuid
     result = db.execute(query)
     if not result:
         return False
@@ -363,18 +363,20 @@ def _get_provider_by_uuid(context, uuid):
 
 
 @db_api.placement_context_manager.reader
-def _get_aggregates_by_provider_id(context, rp_id):
-    """Returns a dict, keyed by internal aggregate ID, of aggregate UUIDs
-    associated with the supplied internal resource provider ID.
+def _get_aggregates_by_provider(context, rp):
+    """Returns a list of UUIDs of any aggregates for the supplied resource
+    provider.
     """
-    join_statement = sa.join(
-        _AGG_TBL, _RP_AGG_TBL, sa.and_(
-            _AGG_TBL.c.id == _RP_AGG_TBL.c.aggregate_id,
-            _RP_AGG_TBL.c.resource_provider_id == rp_id))
-    sel = sa.select([_AGG_TBL.c.id, _AGG_TBL.c.uuid]).select_from(
-        join_statement)
-    return {r[0]: r[1] for r in context.session.execute(sel).fetchall()}
-
+#    """Returns a dict, keyed by internal aggregate ID, of aggregate UUIDs
+#    associated with the supplied internal resource provider ID.
+#    """
+    query = """
+            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[:ASSOCIATED]->
+                (agg:RESOURCE_PROVIDER)
+            RETURN agg.uuid AS agg_uuid
+            """ % rp.uuid
+    result = db.execute(query)
+    return [rec[agg_uuid] for rec in result]
 
 @db_api.placement_context_manager.reader
 def anchors_for_sharing_providers(context, rp_ids, get_id=False):
@@ -475,7 +477,6 @@ def _ensure_aggregate(ctx, agg_uuid):
 @db_api.placement_context_manager.writer
 def _set_aggregates(context, resource_provider, provided_aggregates,
                     increment_generation=False):
-    rp_id = resource_provider.id
     # When aggregate uuids are persisted no validation is done
     # to ensure that they refer to something that has meaning
     # elsewhere. It is assumed that code which makes use of the
@@ -486,96 +487,41 @@ def _set_aggregates(context, resource_provider, provided_aggregates,
     # to avoid bloat if it turns out we're creating a lot of noise.
     # Not doing now to move things along.
     provided_aggregates = set(provided_aggregates)
-    existing_aggregates = _get_aggregates_by_provider_id(context, rp_id)
-    agg_uuids_to_add = provided_aggregates - set(existing_aggregates.values())
-    # A dict, keyed by internal aggregate ID, of aggregate UUIDs that will be
-    # associated with the provider
-    aggs_to_associate = {}
-    # Same dict for those aggregates to remove the association with this
-    # provider
-    aggs_to_disassociate = {
-        agg_id: agg_uuid for agg_id, agg_uuid in existing_aggregates.items()
-        if agg_uuid not in provided_aggregates
-    }
-
-    # Create any aggregates that do not yet exist in
-    # PlacementAggregates. This is different from
-    # the set in existing_aggregates; those are aggregates for
-    # which there are associations for the resource provider
-    # at rp_id. The following loop checks for the existence of any
-    # aggregate with the provided uuid. In this way we only
-    # create a new row in the PlacementAggregate table if the
-    # aggregate uuid has never been seen before. Code further
-    # below will update the associations.
+    existing_aggregates = set(_get_aggregates_by_provider(context,
+            resource_provider))
+    # These are the changes to existing agg associations
+    agg_uuids_to_add = provided_aggregates - existing_aggregates
+    aggs_uuids_to_disassociate = [agg_uuid for agg_uuid in existing_aggregates
+            if agg_uuid not in provided_aggregates]
+    # Create any new associations. This will also create the agg RP if it
+    # doesn't already exist.
     for agg_uuid in agg_uuids_to_add:
-        agg_id = _ensure_aggregate(context, agg_uuid)
-        aggs_to_associate[agg_id] = agg_uuid
-
-    for agg_id, agg_uuid in aggs_to_associate.items():
-        try:
-            ins_stmt = _RP_AGG_TBL.insert().values(
-                resource_provider_id=rp_id, aggregate_id=agg_id)
-            context.session.execute(ins_stmt)
-            LOG.debug("Setting aggregates for provider %s. Successfully "
-                      "associated aggregate %s.",
-                      resource_provider.uuid, agg_uuid)
-        except db_exc.DBDuplicateEntry:
-            LOG.debug("Setting aggregates for provider %s. Another thread "
-                      "already associated aggregate %s. Skipping.",
-                      resource_provider.uuid, agg_uuid)
-            pass
-
-    for agg_id, agg_uuid in aggs_to_disassociate.items():
-        del_stmt = _RP_AGG_TBL.delete().where(
-            sa.and_(
-                _RP_AGG_TBL.c.resource_provider_id == rp_id,
-                _RP_AGG_TBL.c.aggregate_id == agg_id))
-        context.session.execute(del_stmt)
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+                MERGE (agg:RESOURCE_PROVIDER {uuid: '%s'})
+                WITH rp, agg
+                MERGE p=(rp)-[:ASSOCIATES]->(agg)
+                RETURN p
+        """ % (resource_provider.uuid, agg_uuid)
+        db.execute(query)
+        LOG.debug("Setting aggregates for provider %s. Successfully "
+                  "associated aggregate %s.",
+                  resource_provider.uuid, agg_uuid)
+    # Remove any unneeded associations
+    for agg_uuid in aggs_uuids_to_disassociate:
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[rel:ASSOCIATES]->
+                    (agg:RESOURCE_PROVIDER {uuid: '%s'})
+                WITH rp, agg, rel
+                DELETE rel
+                RETURN rp, agg
+        """ % (resource_provider.uuid, agg_uuid)
+        db.execute(query)
         LOG.debug("Setting aggregates for provider %s. Successfully "
                   "disassociated aggregate %s.",
                   resource_provider.uuid, agg_uuid)
-
     if increment_generation:
         resource_provider.increment_generation()
-
-
-def _add_traits_to_provider(ctx, rp_id, to_add):
-    """Adds trait associations to the provider with the supplied ID.
-
-    :param ctx: `placement.context.RequestContext` that has an oslo_db Session
-    :param rp_id: Internal ID of the resource provider on which to add
-                  trait associations
-    :param to_add: set() containing internal trait IDs for traits to add
-    """
-    for trait_id in to_add:
-        try:
-            ins_stmt = _RP_TRAIT_TBL.insert().values(
-                resource_provider_id=rp_id,
-                trait_id=trait_id)
-            ctx.session.execute(ins_stmt)
-        except db_exc.DBDuplicateEntry:
-            # Another thread already set this trait for this provider. Ignore
-            # this for now (but ConcurrentUpdateDetected will end up being
-            # raised almost assuredly when we go to increment the resource
-            # provider's generation later, but that's also fine)
-            pass
-
-
-def _delete_traits_from_provider(ctx, rp_id, to_delete):
-    """Deletes trait associations from the provider with the supplied ID and
-    set() of internal trait IDs.
-
-    :param ctx: `placement.context.RequestContext` that has an oslo_db Session
-    :param rp_id: Internal ID of the resource provider from which to delete
-                  trait associations
-    :param to_delete: set() containing internal trait IDs for traits to
-                      delete
-    """
-    del_stmt = _RP_TRAIT_TBL.delete().where(
-        sa.and_(
-            _RP_TRAIT_TBL.c.resource_provider_id == rp_id,
-            _RP_TRAIT_TBL.c.trait_id.in_(to_delete)))
-    ctx.session.execute(del_stmt)
 
 
 @db_api.placement_context_manager.writer
@@ -590,21 +536,52 @@ def _set_traits(context, rp, traits):
     :param rp: The ResourceProvider object to set traits against
     :param traits: List of Trait objects
     """
-    # Get the internal IDs of our existing traits
-    existing_traits = trait_obj.get_traits_by_provider_id(context, rp.id)
-    existing_traits = set(rec['id'] for rec in existing_traits)
-    want_traits = set(trait.id for trait in traits)
-
-    to_add = want_traits - existing_traits
-    to_delete = existing_traits - want_traits
-
+    # Get the list of all trait names
+    query = """
+            MATCH (t:TRAIT)
+            RETURN t.name AS trait_name
+    """
+    result = db.execute(query)
+    trait_names = [rec["trait_name"] for rec in result]
+    # Get the traits for this RP
+    query = """
+            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+            WITH rp
+            MATCH (t:TRAIT)
+            WHERE t.name IN keys(properties(rp))
+            RETURN t.name AS trait_name
+    """ % rp.uuid
+    result = db.execute(query)
+    existing_traits = set([rec["trait_name"] for rec in result])
+    new_traits = set([trait.name for trait in traits])
+    to_add = new_traits - existing_traits
+    to_delete = existing_traits - new_traits
     if not to_add and not to_delete:
         return
-
+    # Remove the traits no longer needed
     if to_delete:
-        _delete_traits_from_provider(context, rp.id, to_delete)
+        del_list = []
+        for del_trait in to_delete:
+            del_list.append("rp.%s" % del_trait)
+        del_clause = ", ".join(del_list)
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+                REMOVE %s
+                RETURN rp
+        """ % (rp.uuid, del_clause)
+        result = db.execute(query)
+    # Add the new traits, if any
     if to_add:
-        _add_traits_to_provider(context, rp.id, to_add)
+        add_list = []
+        for add_trait in to_add:
+            add_list.append("rp.%s = true" % add_trait)
+        add_clause = ", ".join(add_list)
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+                SET %s
+                RETURN rp
+        """ % (rp.uuid, add_clause)
+        result = db.execute(query)
     rp.increment_generation()
 
 
@@ -919,7 +896,6 @@ class ResourceProvider(object):
         """Delete Inventory of provided resource_class."""
         _delete_inventory(self._context, self, resource_class)
 
-    ##### WORK
     def set_inventory(self, inv_list):
         """Set all resource provider Inventory to be the provided list."""
         exceeded = _set_inventory(self._context, self, inv_list)
@@ -941,8 +917,7 @@ class ResourceProvider(object):
 
     def get_aggregates(self):
         """Get the aggregate uuids associated with this resource provider."""
-        return list(
-            _get_aggregates_by_provider_id(self._context, self.id).values())
+        return _get_aggregates_by_provider(self._context, self)
 
     def set_aggregates(self, aggregate_uuids, increment_generation=False):
         """Set the aggregate uuids associated with this resource provider.
@@ -976,13 +951,15 @@ class ResourceProvider(object):
         """
         rp_gen = self.generation
         new_generation = rp_gen + 1
-        upd_stmt = _RP_TBL.update().where(sa.and_(
-            _RP_TBL.c.id == self.id,
-            _RP_TBL.c.generation == rp_gen)).values(
-            generation=new_generation)
-
-        res = self._context.session.execute(upd_stmt)
-        if res.rowcount != 1:
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+                WHERE rp.generation = %s
+                WITH rp
+                SET rp.generation = %s
+                RETURN rp
+        """ % (self.uuid, rp_gen, new_generation)
+        result = db.execute(query)
+        if not result:
             raise exception.ResourceProviderConcurrentUpdateDetected()
         self.generation = new_generation
 
@@ -1158,6 +1135,7 @@ class ResourceProvider(object):
                 """ % (self.uuid, update_clause)
         result = db.execute(query)
 
+        ##### WORK
         # We should also update the root providers of resource providers
         # originally in the same tree. If re-parenting is supported,
         # this logic should be changed to update only descendents of the
