@@ -67,6 +67,7 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
                     "IS UNIQUE",
                 "CREATE CONSTRAINT ON (rc:RESOURCE_CLASS) ASSERT rc.name "
                     "IS UNIQUE",
+                "CREATE CONSTRAINT ON (t:TRAIT) ASSERT t.name IS UNIQUE",
         ]
         for constraint in constraints:
             graph_db.execute(constraint)
