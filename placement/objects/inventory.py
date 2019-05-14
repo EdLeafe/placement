@@ -11,8 +11,8 @@
 #    under the License.
 
 import six
-import sqlalchemy as sa
 
+from placement.db import graph_db as db
 from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import resource_class_cache as rc_cache
@@ -25,11 +25,9 @@ class Inventory(object):
 
     # kwargs included because some constructors pass resource_class_id
     # but it is not used.
-    def __init__(self, id=None, resource_provider=None, resource_class=None,
-                 total=None, reserved=0, min_unit=1, max_unit=1, step_size=1,
-                 allocation_ratio=1.0, updated_at=None, created_at=None,
-                 **kwargs):
-        self.id = id
+    def __init__(self, resource_provider, resource_class=None, total=None,
+            reserved=0, min_unit=1, max_unit=1, step_size=1,
+            allocation_ratio=1.0, updated_at=None, created_at=None, **kwargs):
         self.resource_provider = resource_provider
         self.resource_class = resource_class
         self.total = total
@@ -66,17 +64,16 @@ def find(inventories, res_class):
 
 
 def get_all_by_resource_provider(context, rp):
-    db_inv = _get_inventory_by_provider_id(context, rp.id)
+    db_inv = _get_inventory_by_provider_uuid(context, rp.uuid)
     # Build up a list of Inventory objects, setting the Inventory object
     # fields to the same-named database record field we got from
-    # _get_inventory_by_provider_id(). We already have the ResourceProvider
+    # _get_inventory_by_provider_uuid(). We already have the ResourceProvider
     # object so we just pass that object to the Inventory object
     # constructor as-is
     inv_list = [
         Inventory(
             resource_provider=rp,
-            resource_class=rc_cache.RC_CACHE.string_from_id(
-                rec['resource_class_id']),
+            resource_class=rec["name"],
             **rec)
         for rec in db_inv
     ]
@@ -84,20 +81,20 @@ def get_all_by_resource_provider(context, rp):
 
 
 @db_api.placement_context_manager.reader
-def _get_inventory_by_provider_id(ctx, rp_id):
-    inv = sa.alias(_INV_TBL, name="i")
-    cols = [
-        inv.c.resource_class_id,
-        inv.c.total,
-        inv.c.reserved,
-        inv.c.min_unit,
-        inv.c.max_unit,
-        inv.c.step_size,
-        inv.c.allocation_ratio,
-        inv.c.updated_at,
-        inv.c.created_at,
-    ]
-    sel = sa.select(cols)
-    sel = sel.where(inv.c.resource_provider_id == rp_id)
-
-    return [dict(r) for r in ctx.session.execute(sel)]
+def _get_inventory_by_provider_uuid(ctx, rp_uuid):
+    query = """
+            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[:PROVIDES]->(rc)
+            RETURN labels(rc)[0] as name, rc
+    """ % rp_uuid
+    result = db.execute(query)
+    inv_props = ("name", "total", "reserved", "min_unit", "max_unit",
+            "step_size", "allocation_ratio", "updated_at", "created_at")
+    ret = []
+    for rec in result:
+        inv = {"name": rec["name"]}
+        for k, v in rec["rc"]:
+            if k not in inv_props:
+                continue
+            inv[k] = v
+        ret.append(inv)
+    return ret
