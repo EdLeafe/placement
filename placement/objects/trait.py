@@ -18,8 +18,8 @@ from oslo_db import api as oslo_db_api
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
 import six
-import sqlalchemy as sa
 
+from placement.db import graph_db as db
 from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import exception
@@ -51,7 +51,6 @@ class Trait(object):
     @staticmethod
     def _from_db_object(context, target, source):
         target._context = context
-        target.id = source['id']
         target.name = source['name']
         target.updated_at = source['updated_at']
         target.created_at = source['created_at']
@@ -60,15 +59,24 @@ class Trait(object):
     @staticmethod
     @db_api.placement_context_manager.writer
     def _create_in_db(context, updates):
-        trait = models.Trait()
-        trait.update(updates)
-        context.session.add(trait)
-        return trait
+        upd_list = []
+        for key, val in updates.items():
+            if isinstance(val, six.string_types):
+                upd_list.append("%s = '%s'" % (key, val))
+            else:
+                upd_list.append("%s = %s" % (key, val))
+        upd_clause = ", ".join(upd_list)
+        query = """
+        CREATE (t:TRAIT {%s})
+        RETURN t
+        """ % upd_clause
+        try:
+            result = db.execute(query)
+        except db.ClientError as e:
+            raise db_exc.DBDuplicateEntry(e)
+        return db.pythonize(result[0])
 
     def create(self):
-        if self.id is not None:
-            raise exception.ObjectActionError(action='create',
-                                              reason='already created')
         if not self.name:
             raise exception.ObjectActionError(action='create',
                                               reason='name is required')
@@ -90,43 +98,58 @@ class Trait(object):
     @staticmethod
     @db_api.placement_context_manager.reader
     def _get_by_name_from_db(context, name):
-        result = context.session.query(models.Trait).filter_by(
-            name=name).first()
+        query = """
+                MATCH (t:TRAIT {name: '%s'})
+                RETURN t
+        """
+        result = db.execute(query)
         if not result:
             raise exception.TraitNotFound(names=name)
-        return result
+        return db.pythonize(result[0])
 
     @classmethod
     def get_by_name(cls, context, name):
         db_trait = cls._get_by_name_from_db(context, six.text_type(name))
         return cls._from_db_object(context, cls(context), db_trait)
 
+    @classmethod
+    def get_all_names(cls, context):
+        query = """
+                MATCH (t:TRAIT)
+                RETURN t.name AS trait_name
+        """
+        result = db.execute(query)
+        trait_names = [rec["trait_name"] for rec in result]
+        return trait_names
+
     @staticmethod
     @db_api.placement_context_manager.writer
-    def _destroy_in_db(context, _id, name):
-        num = context.session.query(models.ResourceProviderTrait).filter(
-            models.ResourceProviderTrait.trait_id == _id).count()
-        if num:
+    def _destroy_in_db(context, name):
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER)
+                WHERE exists(rp.%s)
+        """ % name
+        result = db.execute(query)
+        if result:
             raise exception.TraitInUse(name=name)
-
-        res = context.session.query(models.Trait).filter_by(
-            name=name).delete()
-        if not res:
+        query = """
+                MATCH (t:TRAIT {name: '%s'})
+                WITH t
+                DELETE t
+                RETURN t
+        """ % name
+        result = db.execute(query)
+        if not result:
             raise exception.TraitNotFound(names=name)
 
     def destroy(self):
         if not self.name:
             raise exception.ObjectActionError(action='destroy',
                                               reason='name is required')
-
         if not self.name.startswith(self.CUSTOM_NAMESPACE):
             raise exception.TraitCannotDeleteStandard(name=self.name)
 
-        if self.id is None:
-            raise exception.ObjectActionError(action='destroy',
-                                              reason='ID attribute not found')
-
-        self._destroy_in_db(self._context, self.id, self.name)
+        self._destroy_in_db(self._context, self.name)
 
 
 def ensure_sync(ctx):
@@ -162,75 +185,69 @@ def get_all_by_resource_provider(context, rp):
     """Returns a list containing Trait objects for any trait
     associated with the supplied resource provider.
     """
-    db_traits = get_traits_by_provider_id(context, rp.id)
+    db_traits = get_traits_by_provider_uuid(context, rp.uuid)
     return [Trait(context, **data) for data in db_traits]
 
 
 @db_api.placement_context_manager.reader
-def get_traits_by_provider_id(context, rp_id):
-    t = sa.alias(_TRAIT_TBL, name='t')
-    rpt = sa.alias(_RP_TRAIT_TBL, name='rpt')
+def get_traits_by_provider_uuid(context, rp_uuid):
+    query = """
+            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+            RETURN properties(rp) as props
+    """ % rp_uuid
+    result = db.execute(query)
+    props = [rec["props"] for rec in result]
+    if not props:
+        return []
+    return _traits_from_props(props)
 
-    join_cond = sa.and_(t.c.id == rpt.c.trait_id,
-                        rpt.c.resource_provider_id == rp_id)
-    join = sa.join(t, rpt, join_cond)
-    sel = sa.select([t.c.id, t.c.name,
-                     t.c.created_at, t.c.updated_at]).select_from(join)
-    return [dict(r) for r in context.session.execute(sel).fetchall()]
+
+def _traits_from_props(props):
+    all_traits = Trait.get_all_names()
+    return [prop for p in props if p in all_traits]
 
 
 @db_api.placement_context_manager.reader
-def get_traits_by_provider_tree(ctx, root_ids):
-    """Returns a dict, keyed by provider IDs for all resource providers
-    in all trees indicated in the ``root_ids``, of string trait names
+def get_traits_by_provider_tree(ctx, root_uuids):
+    """Returns a dict, keyed by provider UUIDs for all resource providers
+    in all trees indicated in the ``root_uuids``, of string trait names
     associated with that provider.
 
-    :raises: ValueError when root_ids is empty.
+    :raises: ValueError when root_uuids is empty.
 
     :param ctx: placement.context.RequestContext object
-    :param root_ids: list of root resource provider IDs
+    :param root_ids: list of root resource provider UUIDs
     """
-    if not root_ids:
-        raise ValueError("Expected root_ids to be a list of root resource "
-                         "provider internal IDs, but got an empty list.")
-
-    rpt = sa.alias(_RP_TBL, name='rpt')
-    rptt = sa.alias(_RP_TRAIT_TBL, name='rptt')
-    tt = sa.alias(_TRAIT_TBL, name='t')
-    rpt_rptt = sa.join(rpt, rptt, rpt.c.id == rptt.c.resource_provider_id)
-    j = sa.join(rpt_rptt, tt, rptt.c.trait_id == tt.c.id)
-    sel = sa.select([rptt.c.resource_provider_id, tt.c.name]).select_from(j)
-    sel = sel.where(rpt.c.root_provider_id.in_(root_ids))
-    res = collections.defaultdict(list)
-    for r in ctx.session.execute(sel):
-        res[r[0]].append(r[1])
-    return res
+    if not root_uuids:
+        raise ValueError("Expected root_uuids to be a list of root resource "
+                         "provider UUIDs, but got an empty list.")
+    query = """
+            MATCH (root:RESOURCE_PROVIDER {uuid: '%s'})
+            WITH root
+            OPTIONAL MATCH (root)-[*]->(rp:RESOURCE_PROVIDER)
+            RETURN root, rp
+    """
+    rp_traits = collections.defaultdict(set)
+    for root_uuid in root_uuids:
+        result = db.execute(query % root_uuid)
+        if result:
+            root_rp = db.pythonize(result[0]["root"])
+            root_props = root_rp.keys()
+            root_traits = _traits_from_props(root_props)
+            rp_traits[root_uuid].update(root_traits)
+        for rec in result:
+            rp = rp_traits[rec["rp"]]
+            rp_traits = _traits_from_props(rp_props)
+            rp_traits[rp_uuid].update(rp_traits)
+    # Convert the sets back to lists
+    rp_traits = {k, list(v) for k, v in rp_traits.items()}
+    return rp_traits
 
 
 @db_api.placement_context_manager.reader
 def ids_from_names(ctx, names):
-    """Given a list of string trait names, returns a dict, keyed by those
-    string names, of the corresponding internal integer trait ID.
-
-    :raises: ValueError when names is empty.
-
-    :param ctx: placement.context.RequestContext object
-    :param names: list of string trait names
-    :raise TraitNotFound: if any named trait doesn't exist in the database.
-    """
-    if not names:
-        raise ValueError("Expected names to be a list of string trait "
-                         "names, but got an empty list.")
-
-    # Avoid SAWarnings about unicode types...
-    unames = map(six.text_type, names)
-    tt = sa.alias(_TRAIT_TBL, name='t')
-    sel = sa.select([tt.c.name, tt.c.id]).where(tt.c.name.in_(unames))
-    trait_map = {r[0]: r[1] for r in ctx.session.execute(sel)}
-    if len(trait_map) != len(names):
-        missing = names - set(trait_map)
-        raise exception.TraitNotFound(names=', '.join(missing))
-    return trait_map
+    """This method is no longer needed"""
+    return
 
 
 @db_api.placement_context_manager.reader
@@ -238,27 +255,33 @@ def _get_all_from_db(context, filters):
     if not filters:
         filters = {}
 
-    query = context.session.query(models.Trait)
+    name_where = ""
+    assoc = ""
     if 'name_in' in filters:
-        query = query.filter(models.Trait.name.in_(
-            [six.text_type(n) for n in filters['name_in']]
-        ))
+        name_list = ["'%s'" % six.text_type(n) for n in filters['name_in']]
+        name_where = "WHERE t.name IN [%s]" % name_list
     if 'prefix' in filters:
-        query = query.filter(
-            models.Trait.name.like(six.text_type(filters['prefix'] + '%')))
-    if 'associated' in filters:
-        if filters['associated']:
-            query = query.join(
-                models.ResourceProviderTrait,
-                models.Trait.id == models.ResourceProviderTrait.trait_id
-            ).distinct()
+        prefix_where = "t.name STARTS WITH %s" % prefix
+        if name_where:
+            name_where += "AND %s" % prefix_where
         else:
-            query = query.outerjoin(
-                models.ResourceProviderTrait,
-                models.Trait.id == models.ResourceProviderTrait.trait_id
-            ).filter(models.ResourceProviderTrait.trait_id == sa.null())
-
-    return query.all()
+            name_where = "WHERE %s" % prefix_where
+    if 'associated' in filters:
+        # This will be either True or False
+        assoc = """
+                WITH t
+                MATCH (rp)
+                WHERE %s exists(rp.%s)
+        """
+        add_not = "" if filters["associated"] else "not"
+    query = """
+            MATCH (t:TRAIT)
+            %(name_where)s
+            %(assoc)s
+            RETURN t
+    """ % {"name_where": name_where, "assoc": assoc}
+    result = db.execute(query)
+    return [db.pythonize(rec) for rec in result]
 
 
 @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
@@ -277,26 +300,22 @@ def _trait_sync(ctx):
     """
     # Create a set of all traits in the os_traits library.
     std_traits = set(os_traits.get_traits())
-    sel = sa.select([_TRAIT_TBL.c.name])
-    res = ctx.session.execute(sel).fetchall()
-    # Create a set of all traits in the db that are not custom
-    # traits.
-    db_traits = set(
-        r[0] for r in res
-        if not os_traits.is_custom(r[0])
-    )
+    # Get the traits in the database
+    trait_names = Trait.get_all_names(ctx)
+    db_traits = set(name for name in trait_names
+            if not os.traits.is_custom(name))
     # Determine those traits which are in os_traits but not
     # currently in the database, and insert them.
     need_sync = std_traits - db_traits
-    ins = _TRAIT_TBL.insert()
-    batch_args = [
-        {'name': six.text_type(trait)}
-        for trait in need_sync
-    ]
-    if batch_args:
+    if not need_sync:
+        return
+    for trait_name in need_sync:
+        query = """
+                CREATE (t:TRAIT {name: '%s', created_at: timestamp(),
+                    updated_at: timestamp()})
+                RETURN t
+        """ % trait_name
         try:
-            ctx.session.execute(ins, batch_args)
-            LOG.debug("Synced traits from os_traits into API DB: %s",
-                      need_sync)
-        except db_exc.DBDuplicateEntry:
+            result = db.execute(query)
+        except db.ClientError:
             pass  # some other process sync'd, just ignore
