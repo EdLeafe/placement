@@ -14,26 +14,15 @@ import collections
 
 from oslo_db import api as oslo_db_api
 from oslo_log import log as logging
-import sqlalchemy as sa
-from sqlalchemy import sql
 
 from placement.db import graph_db as db
-from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import exception
 from placement.objects import consumer as consumer_obj
 from placement.objects import project as project_obj
 from placement.objects import resource_provider as rp_obj
 from placement.objects import user as user_obj
-from placement import resource_class_cache as rc_cache
 
-
-_ALLOC_TBL = models.Allocation.__table__
-_CONSUMER_TBL = models.Consumer.__table__
-_INV_TBL = models.Inventory.__table__
-_PROJECT_TBL = models.Project.__table__
-_RP_TBL = models.ResourceProvider.__table__
-_USER_TBL = models.User.__table__
 
 LOG = logging.getLogger(__name__)
 
@@ -187,78 +176,58 @@ def _check_capacity_exceeded(ctx, allocs):
 
 
 @db_api.placement_context_manager.reader
-def _get_allocations_by_provider_id(ctx, rp_id):
-    allocs = sa.alias(_ALLOC_TBL, name="a")
-    consumers = sa.alias(_CONSUMER_TBL, name="c")
-    projects = sa.alias(_PROJECT_TBL, name="p")
-    users = sa.alias(_USER_TBL, name="u")
-    cols = [
-        allocs.c.id,
-        allocs.c.resource_class_id,
-        allocs.c.used,
-        allocs.c.updated_at,
-        allocs.c.created_at,
-        consumers.c.id.label("consumer_id"),
-        consumers.c.generation.label("consumer_generation"),
-        sql.func.coalesce(
-            consumers.c.uuid, allocs.c.consumer_id).label("consumer_uuid"),
-        projects.c.id.label("project_id"),
-        projects.c.external_id.label("project_external_id"),
-        users.c.id.label("user_id"),
-        users.c.external_id.label("user_external_id"),
-    ]
-    # TODO(jaypipes): change this join to be on ID not UUID
-    consumers_join = sa.join(
-        allocs, consumers, allocs.c.consumer_id == consumers.c.uuid)
-    projects_join = sa.join(
-        consumers_join, projects, consumers.c.project_id == projects.c.id)
-    users_join = sa.join(
-        projects_join, users, consumers.c.user_id == users.c.id)
-    sel = sa.select(cols).select_from(users_join)
-    sel = sel.where(allocs.c.resource_provider_id == rp_id)
-
-    return [dict(r) for r in ctx.session.execute(sel)]
+def _get_allocations_by_provider_uuid(ctx, rp_uuid):
+    query = """
+            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+            WITH rp
+            MATCH (rp)-[:PROVIDES]->(rc)
+            WITH rp, rc
+            MATCH p=(cs:CONSUMER)-[:USES]->(rc)
+            WITH rp, rc, labels(rc)[0] AS rc_name, cs,
+                relationships(p)[0] AS usages
+            MATCH (pj:PROJECT)-[:OWNS]->(user:USER)-[:OWNS]->(cs)
+            RETURN rp, rc, rc_name, cs, usages, pj, user
+    """ % rp_uuid
+    result = db.execute(query)
+    allocs = []
+    for record in result:
+        allocs.append({
+            "resource_class_name": record["rc_name"],
+            "used": record["usages"]["amount"],
+            "consumer_uuid": record["cs"]["uuid"],
+            "consumer_generation": record["cs"]["generation"],
+            "project_uuid": record["pj"]["uuid"],
+            "user_uuid": record["user"]["uuid"],
+        })
+    return allocs
 
 
 @db_api.placement_context_manager.reader
 def _get_allocations_by_consumer_uuid(ctx, consumer_uuid):
-    allocs = sa.alias(_ALLOC_TBL, name="a")
-    rp = sa.alias(_RP_TBL, name="rp")
-    consumer = sa.alias(_CONSUMER_TBL, name="c")
-    project = sa.alias(_PROJECT_TBL, name="p")
-    user = sa.alias(_USER_TBL, name="u")
-    cols = [
-        allocs.c.id,
-        allocs.c.resource_provider_id,
-        rp.c.name.label("resource_provider_name"),
-        rp.c.uuid.label("resource_provider_uuid"),
-        rp.c.generation.label("resource_provider_generation"),
-        allocs.c.resource_class_id,
-        allocs.c.used,
-        consumer.c.id.label("consumer_id"),
-        consumer.c.generation.label("consumer_generation"),
-        sql.func.coalesce(
-            consumer.c.uuid, allocs.c.consumer_id).label("consumer_uuid"),
-        project.c.id.label("project_id"),
-        project.c.external_id.label("project_external_id"),
-        user.c.id.label("user_id"),
-        user.c.external_id.label("user_external_id"),
-        allocs.c.created_at,
-        allocs.c.updated_at,
-    ]
-    # Build up the joins of the five tables we need to interact with.
-    rp_join = sa.join(allocs, rp, allocs.c.resource_provider_id == rp.c.id)
-    consumer_join = sa.join(rp_join, consumer,
-                            allocs.c.consumer_id == consumer.c.uuid)
-    project_join = sa.join(consumer_join, project,
-                           consumer.c.project_id == project.c.id)
-    user_join = sa.join(project_join, user,
-                        consumer.c.user_id == user.c.id)
-
-    sel = sa.select(cols).select_from(user_join)
-    sel = sel.where(allocs.c.consumer_id == consumer_uuid)
-
-    return [dict(r) for r in ctx.session.execute(sel)]
+    query = """
+            MATCH p=(cs:CONSUMER {uuid: '%s'})-[:USES]->(rc)
+            WITH cs, rc, labels(rc)[0] AS rc_name,
+                relationships(p)[0] AS usages
+            MATCH (pj:PROJECT)-[:OWNS]->(user:USER)-[:OWNS]->(cs)
+            WITH rc, rc_name, cs, usages, pj, user
+            MATCH (rp:RESOURCE_PROVIDER)-[:PROVIDES]->(rc)
+            RETURN rp, rc, rc_name, cs, usages, pj, user
+    """ % consumer_uuid
+    result = db.execute(query)
+    allocs = []
+    for record in result:
+        allocs.append({
+            "resource_provider_name": record["rp"]["name"],
+            "resource_provider_uuid": record["rp"]["uuid"],
+            "resource_provider_generation": record["rp"]["generation"],
+            "resource_class_name": record["rc_name"],
+            "used": record["usages"]["amount"],
+            "consumer_uuid": record["cs"]["uuid"],
+            "consumer_generation": record["cs"]["generation"],
+            "project_uuid": record["pj"]["uuid"],
+            "user_uuid": record["user"]["uuid"],
+        })
+    return allocs
 
 
 @db_api.placement_context_manager.writer.independent
@@ -267,47 +236,12 @@ def _create_incomplete_consumers_for_provider(ctx, rp_id):
     """Creates consumer record if consumer relationship between allocations ->
     consumers table is missing for any allocation on the supplied provider
     internal ID, using the "incomplete consumer" project and user CONF options.
-    """
-    alloc_to_consumer = sa.outerjoin(
-        _ALLOC_TBL, consumer_obj.CONSUMER_TBL,
-        _ALLOC_TBL.c.consumer_id == consumer_obj.CONSUMER_TBL.c.uuid)
-    sel = sa.select([_ALLOC_TBL.c.consumer_id])
-    sel = sel.select_from(alloc_to_consumer)
-    sel = sel.where(
-        sa.and_(
-            _ALLOC_TBL.c.resource_provider_id == rp_id,
-            consumer_obj.CONSUMER_TBL.c.id.is_(None)))
-    missing = ctx.session.execute(sel).fetchall()
-    if missing:
-        # Do a single INSERT for all missing consumer relationships for the
-        # provider
-        incomplete_proj_id = project_obj.ensure_incomplete_project(ctx)
-        incomplete_user_id = user_obj.ensure_incomplete_user(ctx)
 
-        cols = [
-            _ALLOC_TBL.c.consumer_id,
-            incomplete_proj_id,
-            incomplete_user_id,
-        ]
-        sel = sa.select(cols)
-        sel = sel.select_from(alloc_to_consumer)
-        sel = sel.where(
-            sa.and_(
-                _ALLOC_TBL.c.resource_provider_id == rp_id,
-                consumer_obj.CONSUMER_TBL.c.id.is_(None)))
-        # NOTE(mnaser): It is possible to have multiple consumers having many
-        #               allocations to the same resource provider, which would
-        #               make the INSERT FROM SELECT fail due to duplicates.
-        sel = sel.group_by(_ALLOC_TBL.c.consumer_id)
-        target_cols = ['uuid', 'project_id', 'user_id']
-        ins_stmt = consumer_obj.CONSUMER_TBL.insert().from_select(
-            target_cols, sel)
-        res = ctx.session.execute(ins_stmt)
-        if res.rowcount > 0:
-            LOG.info("Online data migration to fix incomplete consumers "
-                     "for resource provider %s has been run. Migrated %d "
-                     "incomplete consumer records on the fly.", rp_id,
-                     res.rowcount)
+    NOTE: using a graph database, an allocation is a relation between a
+    consumer and a resource. There cannot be an allocation without a consumer,
+    so this method is not necessary.
+    """
+    return
 
 
 @db_api.placement_context_manager.writer.independent
@@ -316,29 +250,12 @@ def _create_incomplete_consumer(ctx, consumer_id):
     """Creates consumer record if consumer relationship between allocations ->
     consumers table is missing for the supplied consumer UUID, using the
     "incomplete consumer" project and user CONF options.
-    """
-    alloc_to_consumer = sa.outerjoin(
-        _ALLOC_TBL, consumer_obj.CONSUMER_TBL,
-        _ALLOC_TBL.c.consumer_id == consumer_obj.CONSUMER_TBL.c.uuid)
-    sel = sa.select([_ALLOC_TBL.c.consumer_id])
-    sel = sel.select_from(alloc_to_consumer)
-    sel = sel.where(
-        sa.and_(
-            _ALLOC_TBL.c.consumer_id == consumer_id,
-            consumer_obj.CONSUMER_TBL.c.id.is_(None)))
-    missing = ctx.session.execute(sel).fetchall()
-    if missing:
-        incomplete_proj_id = project_obj.ensure_incomplete_project(ctx)
-        incomplete_user_id = user_obj.ensure_incomplete_user(ctx)
 
-        ins_stmt = consumer_obj.CONSUMER_TBL.insert().values(
-            uuid=consumer_id, project_id=incomplete_proj_id,
-            user_id=incomplete_user_id)
-        res = ctx.session.execute(ins_stmt)
-        if res.rowcount > 0:
-            LOG.info("Online data migration to fix incomplete consumers "
-                     "for consumer %s has been run. Migrated %d incomplete "
-                     "consumer records on the fly.", consumer_id, res.rowcount)
+    NOTE: using a graph database, an allocation is a relation between a
+    consumer and a resource. There cannot be an allocation without a consumer,
+    so this method is not necessary.
+    """
+    return
 
 
 @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
