@@ -62,8 +62,9 @@ def _delete_allocations_for_consumer(ctx, consumer_uuid):
     fails, the deletion will also be rolled back.
     """
     query = """
-            MATCH (:CONSUMER {uuid: '%s'})-[u:USES]->()
-            DELETE u
+            MATCH p=(:CONSUMER {uuid: '%s'})-[:USES]->()
+            WITH relationships(p)[0] AS usages
+            DELETE usages
     """ % consumer_uuid
     db.execute(query)
 

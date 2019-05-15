@@ -58,9 +58,10 @@ def delete_consumers_if_no_allocations(ctx, consumer_uuids):
     """
     # Delete consumers that have no usages
     query = """
-            MATCH (cs:CONSUMER)-[u:USES*0..1]->(rc)
-            WITH cs, size(u) as num
-            WITH cs, sum(num) as relnum
+            MATCH p=(cs:CONSUMER)-[:USES*0..1]->(rc)
+            WITH cs, relationships(p)[0] AS usage
+            WITH cs, size(usage) As num
+            WITH cs, sum(num) AS relnum
             WHERE relnum = 0
             DELETE cs
     """
@@ -160,9 +161,10 @@ class Consumer(object):
         @db_api.placement_context_manager.writer
         def _update_in_db(ctx):
             query = """
-                    MATCH (u:USER)-[o:OWNS]-(cs:CONSUMER {uuid: '%s',
+                    MATCH p=(u:USER)-[:OWNS]-(cs:CONSUMER {uuid: '%s',
                         generation: %s})
-                    DELETE o
+                    WITH cs, relationships(p)[0] AS owns
+                    DELETE owns
                     WITH cs
                     MATCH (u:USER {uuid: '%s'})
                     WITH u, cs

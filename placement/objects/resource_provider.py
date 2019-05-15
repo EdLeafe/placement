@@ -114,9 +114,9 @@ def get_allocated_inventory(self, rp, rcs=None):
     `rcs` that have allocations.
     """
     query = """
-            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-->(inv)<-[u:USES]-(cs)
-            WITH labels(inv)[0] AS rc
-            RETURN rc, sum(u.total) AS used
+            MATCH p=(rp:RESOURCE_PROVIDER {uuid: '%s'})-->(inv)<-[:USES]-(cs)
+            WITH relationships(p)[0] AS usages, labels(inv)[0] AS rc
+            RETURN rc, sum(usages.total) AS used
             """ % rp.uuid
     result = db.execute(query)
     if not result:
@@ -147,8 +147,8 @@ def _delete_inventory_from_provider(ctx, rp, to_delete):
     for rc in to_delete:
         # Delete the providing relationship first
         query = """
-                MATCH (rp)-[rel:PROVIDES]->(rc:%s)
-                WITH rel, rc
+                MATCH p=(rp)-[:PROVIDES]->(rc:%s)
+                WITH relationships(p)[0] AS rel, rc
                 DELETE rel
                 RETURN id(rc) AS rcid
                 """ % rc
@@ -510,9 +510,9 @@ def _set_aggregates(context, resource_provider, provided_aggregates,
     # Remove any unneeded associations
     for agg_uuid in aggs_uuids_to_disassociate:
         query = """
-                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[rel:ASSOCIATES]->
+                MATCH p=(rp:RESOURCE_PROVIDER {uuid: '%s'})-[:ASSOCIATES]->
                     (agg:RESOURCE_PROVIDER {uuid: '%s'})
-                WITH rp, agg, rel
+                WITH rp, agg, relationships(p)[0] AS rel
                 DELETE rel
                 RETURN rp, agg
         """ % (resource_provider.uuid, agg_uuid)
@@ -1216,8 +1216,9 @@ def get_providers_with_shared_capacity(ctx, rc_id, amount, member_of=None):
             WITH rp
             MATCH (rp)-[:PROVIDES]->(rc:%s)
             WITH rp, rc
-            OPTIONAL MATCH (cs:CONSUMER)-[u:USES]->(rc)
-            WITH rp, rc, sum(u.total) AS total_used
+            OPTIONAL MATCH p=(cs:CONSUMER)-[:USES]->(rc)
+            WITH rp, rc, relationships(p)[0] AS usages
+            WITH rp, rc, sum(usages.total) AS total_used
             MATCH (rc)
             WHERE rc.total - total_used >= %s
             RETURN rp.uuid AS rp_uuid
