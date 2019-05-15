@@ -68,6 +68,9 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
                 "CREATE CONSTRAINT ON (rc:RESOURCE_CLASS) ASSERT rc.name "
                     "IS UNIQUE",
                 "CREATE CONSTRAINT ON (t:TRAIT) ASSERT t.name IS UNIQUE",
+                "CREATE CONSTRAINT ON (pj:PROJECT) ASSERT uuid IS UNIQUE",
+                "CREATE CONSTRAINT ON (u:USER) ASSERT u.uuid IS UNIQUE",
+                "CREATE CONSTRAINT ON (cs:CONSUMER) ASSERT cs.uuid IS UNIQUE",
         ]
         for constraint in constraints:
             graph_db.execute(constraint)

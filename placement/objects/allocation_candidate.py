@@ -118,6 +118,7 @@ class AllocationCandidates(object):
                 (required_trait_map, request.required_traits),
                 (forbidden_trait_map, request.forbidden_traits)):
             if traits:
+                # TODO: EGL: Traits no longer have IDs
                 trait_map.update(trait_obj.ids_from_names(context, traits))
 
         member_of = request.member_of

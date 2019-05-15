@@ -11,16 +11,12 @@
 #    under the License.
 
 from oslo_db import exception as db_exc
-import sqlalchemy as sa
 
-from placement.db.sqlalchemy import models
+from placement.db import graph_db as db
 from placement import db_api
 from placement import exception
 from placement.objects import project as project_obj
 from placement.objects import user as user_obj
-
-CONSUMER_TBL = models.Consumer.__table__
-_ALLOC_TBL = models.Allocation.__table__
 
 
 @db_api.placement_context_manager.writer
@@ -32,36 +28,23 @@ def create_incomplete_consumers(ctx, batch_size):
     Returns a tuple containing two identical elements with the number of
     consumer records created, since this is the expected return format for data
     migration routines.
+
+    # NOTE (edleafe): NOT NEEDED WITH GRAPH DBs. This is a migration process
+    # that should be run before converting to a graph DB.
     """
-    # Create a record in the projects table for our incomplete project
-    incomplete_proj_id = project_obj.ensure_incomplete_project(ctx)
-
-    # Create a record in the users table for our incomplete user
-    incomplete_user_id = user_obj.ensure_incomplete_user(ctx)
-
-    # Create a consumer table record for all consumers where
-    # allocations.consumer_id doesn't exist in the consumers table. Use the
-    # incomplete consumer project and user ID.
-    alloc_to_consumer = sa.outerjoin(
-        _ALLOC_TBL, CONSUMER_TBL,
-        _ALLOC_TBL.c.consumer_id == CONSUMER_TBL.c.uuid)
-    cols = [
-        _ALLOC_TBL.c.consumer_id,
-        incomplete_proj_id,
-        incomplete_user_id,
-    ]
-    sel = sa.select(cols)
-    sel = sel.select_from(alloc_to_consumer)
-    sel = sel.where(CONSUMER_TBL.c.id.is_(None))
-    # NOTE(mnaser): It is possible to have multiple consumers having many
-    #               allocations to the same resource provider, which would
-    #               make the INSERT FROM SELECT fail due to duplicates.
-    sel = sel.group_by(_ALLOC_TBL.c.consumer_id)
-    sel = sel.limit(batch_size)
-    target_cols = ['uuid', 'project_id', 'user_id']
-    ins_stmt = CONSUMER_TBL.insert().from_select(target_cols, sel)
-    res = ctx.session.execute(ins_stmt)
-    return res.rowcount, res.rowcount
+    user_uuid = user_obj.ensure_incomplete_user(ctx)
+    # Find all the consumers with no relation to a user, and then set the
+    # relation to the incomplete_user.
+    query = """
+            MATCH (u:USER {uuid: '%s'})
+            MATCH p=()-[:OWNS]->(cs:CONSUMER)
+            WITH u, cs, size(relationships(p)) AS numrel
+            WITH u, cs, sum(numrel) AS total_rel
+            WHERE total_rel = 0
+            MERGE (u)->[:OWNS]->(cs)
+            RETURN cs
+    """ % user_uuid
+    db.execute(query)
 
 
 @db_api.placement_context_manager.writer
@@ -73,71 +56,59 @@ def delete_consumers_if_no_allocations(ctx, consumer_uuids):
                 contains an oslo_db Session
     :param consumer_uuids: UUIDs of the consumers to check and maybe delete
     """
-    # Delete consumers that are not referenced in the allocations table
-    cons_to_allocs_join = sa.outerjoin(
-        CONSUMER_TBL, _ALLOC_TBL,
-        CONSUMER_TBL.c.uuid == _ALLOC_TBL.c.consumer_id)
-    subq = sa.select([CONSUMER_TBL.c.uuid]).select_from(cons_to_allocs_join)
-    subq = subq.where(sa.and_(
-        _ALLOC_TBL.c.consumer_id.is_(None),
-        CONSUMER_TBL.c.uuid.in_(consumer_uuids)))
-    no_alloc_consumers = [r[0] for r in ctx.session.execute(subq).fetchall()]
-    del_stmt = CONSUMER_TBL.delete()
-    del_stmt = del_stmt.where(CONSUMER_TBL.c.uuid.in_(no_alloc_consumers))
-    ctx.session.execute(del_stmt)
+    # Delete consumers that have no usages
+    query = """
+            MATCH (cs:CONSUMER)-[u:USES*0..1]->(rc)
+            WITH cs, size(u) as num
+            WITH cs, sum(num) as relnum
+            WHERE relnum = 0
+            DELETE cs
+    """
+    db.execute(query)
 
 
 @db_api.placement_context_manager.reader
 def _get_consumer_by_uuid(ctx, uuid):
-    # The SQL for this looks like the following:
-    # SELECT
-    #   c.id, c.uuid,
-    #   p.id AS project_id, p.external_id AS project_external_id,
-    #   u.id AS user_id, u.external_id AS user_external_id,
-    #   c.updated_at, c.created_at
-    # FROM consumers c
-    # INNER JOIN projects p
-    #  ON c.project_id = p.id
-    # INNER JOIN users u
-    #  ON c.user_id = u.id
-    # WHERE c.uuid = $uuid
-    consumers = sa.alias(CONSUMER_TBL, name="c")
-    projects = sa.alias(project_obj.PROJECT_TBL, name="p")
-    users = sa.alias(user_obj.USER_TBL, name="u")
-    cols = [
-        consumers.c.id,
-        consumers.c.uuid,
-        projects.c.id.label("project_id"),
-        projects.c.external_id.label("project_external_id"),
-        users.c.id.label("user_id"),
-        users.c.external_id.label("user_external_id"),
-        consumers.c.generation,
-        consumers.c.updated_at,
-        consumers.c.created_at
-    ]
-    c_to_p_join = sa.join(
-        consumers, projects, consumers.c.project_id == projects.c.id)
-    c_to_u_join = sa.join(
-        c_to_p_join, users, consumers.c.user_id == users.c.id)
-    sel = sa.select(cols).select_from(c_to_u_join)
-    sel = sel.where(consumers.c.uuid == uuid)
-    res = ctx.session.execute(sel).fetchone()
-    if not res:
+    """Return information about the consumer and its related project and user.
+    """
+    query = """
+            MATCH (cs:CONSUMER {uuid: '%s'})
+            WITH cs
+            MATCH (pj:PROJECT)-[:OWNS]->(cs)
+            WITH cs, pj
+            MATCH (u:USER)-[:BELONGS_TO]->(pj)
+            RETURN cs, pj, u
+    """ % uuid
+    result = db.execute(query)
+    if not result:
         raise exception.ConsumerNotFound(uuid=uuid)
-
-    return dict(res)
+    rec = result[0]
+    cs = db.pythonize(rec["cs"])
+    pj = db.pythonize(rec["pj"])
+    user = db.pythonize(rec["u"])
+    return {"uuid": cs.uuid,
+            "project_uuid": pj.uuid,
+            "user_uuid": user.uuid,
+            "generation": cs.generation,
+            "updated_at": cs.updated_at,
+            "created_at": cs.created_at,
+    }
 
 
 @db_api.placement_context_manager.writer
 def _delete_consumer(ctx, consumer):
-    """Deletes the supplied consumer.
+    """Deletes the supplied consumer. If the consumer has any allocations
+    against resources, those will also be deleted.
 
     :param ctx: `placement.context.RequestContext` that contains an oslo_db
                 Session
     :param consumer: `Consumer` whose generation should be updated.
     """
-    del_stmt = CONSUMER_TBL.delete().where(CONSUMER_TBL.c.id == consumer.id)
-    ctx.session.execute(del_stmt)
+    query = """
+            MATCH (cs:CONSUMER {uuid: '%s'})
+            DETACH DELETE cs
+    """ % consumer.uuid
+    db.execute(query)
 
 
 class Consumer(object):
@@ -155,19 +126,13 @@ class Consumer(object):
 
     @staticmethod
     def _from_db_object(ctx, target, source):
-        target.id = source['id']
         target.uuid = source['uuid']
         target.generation = source['generation']
         target.created_at = source['created_at']
         target.updated_at = source['updated_at']
 
-        target.project = project_obj.Project(
-            ctx, id=source['project_id'],
-            external_id=source['project_external_id'])
-        target.user = user_obj.User(
-            ctx, id=source['user_id'],
-            external_id=source['user_external_id'])
-
+        target.project = project_obj.Project(ctx, uuid=source["project_uuid"])
+        target.user = user_obj.User(ctx, uuid=source["user_uuid"])
         target._context = ctx
         return target
 
@@ -179,38 +144,31 @@ class Consumer(object):
     def create(self):
         @db_api.placement_context_manager.writer
         def _create_in_db(ctx):
-            db_obj = models.Consumer(
-                uuid=self.uuid, project_id=self.project.id,
-                user_id=self.user.id)
-            try:
-                db_obj.save(ctx.session)
-                # NOTE(jaypipes): We don't do the normal _from_db_object()
-                # thing here because models.Consumer doesn't have a
-                # project_external_id or user_external_id attribute.
-                self.id = db_obj.id
-                self.generation = db_obj.generation
-            except db_exc.DBDuplicateEntry:
-                raise exception.ConsumerExists(uuid=self.uuid)
+            query = """
+                    MERGE (cs:CONSUMER {uuid: '%s', generation: 0})
+                    RETURN cs
+            """ % self.uuid
+            db.execute(query)
         _create_in_db(self._context)
 
     def update(self):
         """Used to update the consumer's project and user information without
-        incrementing the consumer's generation.
+        incrementing the consumer's generation. Since the relation is
+        project->user->consumer, we only need to update the user->consumer
+        relationship.
         """
         @db_api.placement_context_manager.writer
         def _update_in_db(ctx):
-            upd_stmt = CONSUMER_TBL.update().values(
-                project_id=self.project.id, user_id=self.user.id)
-            # NOTE(jaypipes): We add the generation check to the WHERE clause
-            # above just for safety. We don't need to check that the statement
-            # actually updated a single row. If it did not, then the
-            # consumer.increment_generation() call that happens in
-            # AllocationList.replace_all() will end up raising
-            # ConcurrentUpdateDetected anyway
-            upd_stmt = upd_stmt.where(sa.and_(
-                CONSUMER_TBL.c.id == self.id,
-                CONSUMER_TBL.c.generation == self.generation))
-            ctx.session.execute(upd_stmt)
+            query = """
+                    MATCH (u:USER)-[o:OWNS]-(cs:CONSUMER {uuid: '%s',
+                        generation: %s})
+                    DELETE o
+                    WITH cs
+                    MATCH (u:USER {uuid: '%s'})
+                    WITH u, cs
+                    CREATE (u)-[:OWNS]->(cs)
+            """ % (self.uuid, self.generation, self.user_uuid)
+            db.execute(query)
         _update_in_db(self._context)
 
     def increment_generation(self):
@@ -224,13 +182,14 @@ class Consumer(object):
         """
         consumer_gen = self.generation
         new_generation = consumer_gen + 1
-        upd_stmt = CONSUMER_TBL.update().where(sa.and_(
-            CONSUMER_TBL.c.id == self.id,
-            CONSUMER_TBL.c.generation == consumer_gen)).values(
-            generation=new_generation)
-
-        res = self._context.session.execute(upd_stmt)
-        if res.rowcount != 1:
+        query = """
+                MATCH (cs:CONSUMER {uuid: '%s', generation: %s})
+                WITH cs
+                SET cs.generation = %s
+                RETURN cs
+        """ % (self.uuid, consumer_gen, new_generation)
+        result = db.execute(query)
+        if not result:
             raise exception.ConcurrentUpdateDetected
         self.generation = new_generation
 

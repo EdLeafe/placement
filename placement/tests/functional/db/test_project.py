@@ -19,13 +19,13 @@ from placement.tests.functional.db import test_base as tb
 class ProjectTestCase(tb.PlacementDbBaseTestCase):
     def test_non_existing_project(self):
         self.assertRaises(
-            exception.ProjectNotFound, project_obj.Project.get_by_external_id,
+            exception.ProjectNotFound, project_obj.Project.get_by_uuid,
             self.ctx, uuids.non_existing_project)
 
     def test_create_and_get(self):
         p = project_obj.Project(self.ctx, external_id='another-project')
         p.create()
-        p = project_obj.Project.get_by_external_id(self.ctx, 'another-project')
+        p = project_obj.Project.get_by_uuid(self.ctx, 'another-project')
         # Project ID == 1 is fake-project created in setup
         self.assertEqual(2, p.id)
         self.assertRaises(exception.ProjectExists, p.create)

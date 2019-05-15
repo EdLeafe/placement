@@ -38,10 +38,10 @@ class TestEnsureConsumer(testtools.TestCase):
         conf.register_opts(self.conf)
         self.mock_project_get = self.useFixture(fixtures.MockPatch(
             'placement.objects.project.'
-            'Project.get_by_external_id')).mock
+            'Project.get_by_uuid')).mock
         self.mock_user_get = self.useFixture(fixtures.MockPatch(
             'placement.objects.user.'
-            'User.get_by_external_id')).mock
+            'User.get_by_uuid')).mock
         self.mock_consumer_get = self.useFixture(fixtures.MockPatch(
             'placement.objects.consumer.'
             'Consumer.get_by_uuid')).mock

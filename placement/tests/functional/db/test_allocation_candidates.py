@@ -319,6 +319,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         def run(traitnames, expected_ids):
             tmap = {}
             if traitnames:
+                # TODO: EGL: Traits no longer have IDs
                 tmap = trait_obj.ids_from_names(self.ctx, traitnames)
             obs = rp_obj._get_provider_ids_having_all_traits(self.ctx, tmap)
             self.assertEqual(sorted(expected_ids), sorted(obs))

@@ -537,12 +537,7 @@ def _set_traits(context, rp, traits):
     :param traits: List of Trait objects
     """
     # Get the list of all trait names
-    query = """
-            MATCH (t:TRAIT)
-            RETURN t.name AS trait_name
-    """
-    result = db.execute(query)
-    trait_names = [rec["trait_name"] for rec in result]
+    trait_names = trait_obj.Trait.get_all_names(context)
     # Get the traits for this RP
     query = """
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
@@ -1135,11 +1130,11 @@ class ResourceProvider(object):
                 """ % (self.uuid, update_clause)
         result = db.execute(query)
 
-        ##### WORK
         # We should also update the root providers of resource providers
         # originally in the same tree. If re-parenting is supported,
         # this logic should be changed to update only descendents of the
         # re-parented resource providers, not all the providers in the tree.
+        # TODO: EGL: need to figure out what this logic translates to
         for rp in same_tree:
             # If the parent is not updated, this clause is skipped since the
             # `same_tree` has no element.
@@ -1170,6 +1165,7 @@ class ResourceProvider(object):
         return resource_provider
 
 
+##### WORK
 @db_api.placement_context_manager.reader
 def get_providers_with_shared_capacity(ctx, rc_id, amount, member_of=None):
     """Returns a list of resource provider IDs (internal IDs, not UUIDs)
@@ -1215,86 +1211,19 @@ def get_providers_with_shared_capacity(ctx, rc_id, amount, member_of=None):
                       resource providers that *directly* belong to the
                       aggregates referenced.
     """
-    # The SQL we need to generate here looks like this:
-    #
-    # SELECT rp.id
-    # FROM resource_providers AS rp
-    #   INNER JOIN resource_provider_traits AS rpt
-    #     ON rp.id = rpt.resource_provider_id
-    #   INNER JOIN traits AS t
-    #     ON rpt.trait_id = t.id
-    #     AND t.name = "MISC_SHARES_VIA_AGGREGATE"
-    #   INNER JOIN inventories AS inv
-    #     ON rp.id = inv.resource_provider_id
-    #     AND inv.resource_class_id = $rc_id
-    #   LEFT JOIN (
-    #     SELECT resource_provider_id, SUM(used) as used
-    #     FROM allocations
-    #     WHERE resource_class_id = $rc_id
-    #     GROUP BY resource_provider_id
-    #   ) AS usage
-    #     ON rp.id = usage.resource_provider_id
-    # WHERE COALESCE(usage.used, 0) + $amount <= (
-    #   inv.total - inv.reserved) * inv.allocation_ratio
-    # ) AND
-    #   inv.min_unit <= $amount AND
-    #   inv.max_unit >= $amount AND
-    #   $amount % inv.step_size = 0
-    # GROUP BY rp.id
-
-    rp_tbl = sa.alias(_RP_TBL, name='rp')
-    inv_tbl = sa.alias(_INV_TBL, name='inv')
-    t_tbl = sa.alias(_TRAIT_TBL, name='t')
-    rpt_tbl = sa.alias(_RP_TRAIT_TBL, name='rpt')
-
-    rp_to_rpt_join = sa.join(
-        rp_tbl, rpt_tbl,
-        rp_tbl.c.id == rpt_tbl.c.resource_provider_id,
-    )
-
-    rpt_to_t_join = sa.join(
-        rp_to_rpt_join, t_tbl,
-        sa.and_(
-            rpt_tbl.c.trait_id == t_tbl.c.id,
-            # The traits table wants unicode trait names, but os_traits
-            # presents native str, so we need to cast.
-            t_tbl.c.name == six.text_type(os_traits.MISC_SHARES_VIA_AGGREGATE),
-        ),
-    )
-
-    rp_to_inv_join = sa.join(
-        rpt_to_t_join, inv_tbl,
-        sa.and_(
-            rpt_tbl.c.resource_provider_id == inv_tbl.c.resource_provider_id,
-            inv_tbl.c.resource_class_id == rc_id,
-        ),
-    )
-
-    usage = _usage_select([rc_id])
-
-    inv_to_usage_join = sa.outerjoin(
-        rp_to_inv_join, usage,
-        inv_tbl.c.resource_provider_id == usage.c.resource_provider_id,
-    )
-
-    where_conds = _capacity_check_clause(amount, usage, inv_tbl=inv_tbl)
-
-    # If 'member_of' has values, do a separate lookup to identify the
-    # resource providers that meet the member_of constraints.
-    if member_of:
-        rps_in_aggs = provider_ids_matching_aggregates(ctx, member_of)
-        if not rps_in_aggs:
-            # Short-circuit. The user either asked for a non-existing
-            # aggregate or there were no resource providers that matched
-            # the requirements...
-            return []
-        where_conds.append(rp_tbl.c.id.in_(rps_in_aggs))
-
-    sel = sa.select([rp_tbl.c.id]).select_from(inv_to_usage_join)
-    sel = sel.where(where_conds)
-    sel = sel.group_by(rp_tbl.c.id)
-
-    return [r[0] for r in ctx.session.execute(sel)]
+    query = """
+            MATCH ()-[:ASSOCIATES]->(rp:RESOURCE_PROVIDER)
+            WITH rp
+            MATCH (rp)-[:PROVIDES]->(rc:%s)
+            WITH rp, rc
+            OPTIONAL MATCH (cs:CONSUMER)-[u:USES]->(rc)
+            WITH rp, rc, sum(u.total) AS total_used
+            MATCH (rc)
+            WHERE rc.total - total_used >= %s
+            RETURN rp.uuid AS rp_uuid
+    """
+    result = db.execute(query)
+    return [rec["rp_uuid"] for rec in result]
 
 
 @db_api.placement_context_manager.reader
@@ -1560,6 +1489,7 @@ def get_provider_ids_for_traits_and_aggs(ctx, required_traits,
 
 def _normalize_trait_map(ctx, traits):
     if not isinstance(traits, dict):
+	# TODO: EGL: Traits no longer have IDs
         return trait_obj.ids_from_names(ctx, traits)
     return traits
 

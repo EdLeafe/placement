@@ -24,6 +24,7 @@ class TraitTestCase(tb.PlacementDbBaseTestCase):
                           self.ctx, [])
 
     def test_trait_ids_from_names_empty_param(self):
+        # TODO: EGL: Traits no longer have IDs
         self.assertRaises(ValueError, trait_obj.ids_from_names,
                           self.ctx, [])
 

@@ -11,80 +11,78 @@
 #    under the License.
 
 from oslo_db import exception as db_exc
-import sqlalchemy as sa
 
-from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import exception
-
-USER_TBL = models.User.__table__
 
 
 @db_api.placement_context_manager.writer
 def ensure_incomplete_user(ctx):
-    """Ensures that a user record is created for the "incomplete consumer
-    user". Returns the internal ID of that record.
+    """Ensures that a user node is created for the "incomplete consumer
+    user". Returns the UUID of that record.
     """
-    incomplete_id = ctx.config.placement.incomplete_consumer_user_id
-    sel = sa.select([USER_TBL.c.id]).where(
-        USER_TBL.c.external_id == incomplete_id)
-    res = ctx.session.execute(sel).fetchone()
-    if res:
-        return res[0]
-    ins = USER_TBL.insert().values(external_id=incomplete_id)
-    res = ctx.session.execute(ins)
-    return res.inserted_primary_key[0]
+    # First, make sure the incomplete project exists
+    project_uuid = project_obj.ensure_incomplete_project(ctx)
+    incomplete_uuid = ctx.config.placement.incomplete_consumer_user_id
+    # Now create the user if it doesn't exist, and the relationship to the
+    # incomplete project node.
+    query = """
+            MERGE (u:USER {uuid: '%s'})
+            MERGE (pj:PROJECT {uuid: '%s'})
+            WITH u, pj
+            MERGE (pj)-[:OWNS]->(u)
+    """ % (incomplete_uuid, project_uuid)
+    return incomplete_uuid
 
 
 @db_api.placement_context_manager.reader
-def _get_user_by_external_id(ctx, external_id):
-    users = sa.alias(USER_TBL, name="u")
-    cols = [
-        users.c.id,
-        users.c.external_id,
-        users.c.updated_at,
-        users.c.created_at
-    ]
-    sel = sa.select(cols)
-    sel = sel.where(users.c.external_id == external_id)
-    res = ctx.session.execute(sel).fetchone()
-    if not res:
-        raise exception.UserNotFound(external_id=external_id)
-
-    return dict(res)
+def _get_user_by_uuid(ctx, uuid):
+    query = """
+            MATCH (u:USER {uuid: '%s'})
+            RETURN u
+    """ % uuid
+    result = db.execute(query)
+    if not result:
+        raise exception.UserNotFound(uuid=uuid)
+    rec = db.pythonize(result[0]["u"])
+    return {"uuid": rec.uuid,
+            "updated_at": rec.updated_at,
+            "created_at": rec.created_at,
+            }
 
 
 class User(object):
-
-    def __init__(self, context, id=None, external_id=None, updated_at=None,
-                 created_at=None):
+    def __init__(self, context, uuid=None, updated_at=None, created_at=None):
         self._context = context
-        self.id = id
-        self.external_id = external_id
+        self.uuid = uuid
         self.updated_at = updated_at
         self.created_at = created_at
 
     @staticmethod
     def _from_db_object(ctx, target, source):
         target._context = ctx
-        target.id = source['id']
-        target.external_id = source['external_id']
+        target.uuid = source['uuid']
         target.updated_at = source['updated_at']
         target.created_at = source['created_at']
         return target
 
     @classmethod
-    def get_by_external_id(cls, ctx, external_id):
-        res = _get_user_by_external_id(ctx, external_id)
+    def get_by_uuid(cls, ctx, uuid):
+        res = _get_user_by_uuid(ctx, uuid)
         return cls._from_db_object(ctx, cls(ctx), res)
 
     def create(self):
         @db_api.placement_context_manager.writer
         def _create_in_db(ctx):
-            db_obj = models.User(external_id=self.external_id)
+            query = """
+                    CREATE (u:USER {uuid: '%s', created_at: timestamp(),
+                        updated_at: timestamp()})
+                    RETURN u
+            """ % self.uuid
             try:
-                db_obj.save(ctx.session)
-            except db_exc.DBDuplicateEntry:
-                raise exception.UserExists(external_id=self.external_id)
+                result = db.execute(query)
+            except db.ClientError:
+                raise exception.UserExists(uuid=self.uuid)
+            db_obj = db.pythonize(result[0]["u"])
             self._from_db_object(ctx, self, db_obj)
         _create_in_db(self._context)

@@ -54,7 +54,7 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
         project_id = ctx.config.placement.incomplete_consumer_project_id
         user_id = ctx.config.placement.incomplete_consumer_user_id
     try:
-        proj = project_obj.Project.get_by_external_id(ctx, project_id)
+        proj = project_obj.Project.get_by_uuid(ctx, project_id)
     except exception.NotFound:
         # Auto-create the project if we found no record of it...
         try:
@@ -62,9 +62,9 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
             proj.create()
         except exception.ProjectExists:
             # No worries, another thread created this project already
-            proj = project_obj.Project.get_by_external_id(ctx, project_id)
+            proj = project_obj.Project.get_by_uuid(ctx, project_id)
     try:
-        user = user_obj.User.get_by_external_id(ctx, user_id)
+        user = user_obj.User.get_by_uuid(ctx, user_id)
     except exception.NotFound:
         # Auto-create the user if we found no record of it...
         try:
@@ -72,7 +72,7 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
             user.create()
         except exception.UserExists:
             # No worries, another thread created this user already
-            user = user_obj.User.get_by_external_id(ctx, user_id)
+            user = user_obj.User.get_by_uuid(ctx, user_id)
 
     try:
         consumer = consumer_obj.Consumer.get_by_uuid(ctx, consumer_uuid)

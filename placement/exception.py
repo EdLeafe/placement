@@ -173,19 +173,19 @@ class TraitNotFound(NotFound):
 
 
 class ProjectNotFound(NotFound):
-    msg_fmt = "No such project(s): %(external_id)s."
+    msg_fmt = "No such project(s): %(uuid)s."
 
 
 class ProjectExists(Exists):
-    msg_fmt = "The project %(external_id)s already exists."
+    msg_fmt = "The project %(uuid)s already exists."
 
 
 class UserNotFound(NotFound):
-    msg_fmt = "No such user(s): %(external_id)s."
+    msg_fmt = "No such user(s): %(uuid)s."
 
 
 class UserExists(Exists):
-    msg_fmt = "The user %(external_id)s already exists."
+    msg_fmt = "The user %(uuid)s already exists."
 
 
 class ConsumerNotFound(NotFound):

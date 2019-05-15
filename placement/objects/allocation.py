@@ -44,10 +44,9 @@ RP_CONFLICT_RETRY_COUNT = 10
 
 class Allocation(object):
 
-    def __init__(self, id=None, resource_provider=None, consumer=None,
+    def __init__(self, resource_provider=None, consumer=None,
                  resource_class=None, used=0, updated_at=None,
                  created_at=None):
-        self.id = id
         self.resource_provider = resource_provider
         self.resource_class = resource_class
         self.consumer = consumer
@@ -57,23 +56,16 @@ class Allocation(object):
 
 
 @db_api.placement_context_manager.writer
-def _delete_allocations_for_consumer(ctx, consumer_id):
+def _delete_allocations_for_consumer(ctx, consumer_uuid):
     """Deletes any existing allocations that correspond to the allocations to
     be written. This is wrapped in a transaction, so if the write subsequently
     fails, the deletion will also be rolled back.
     """
-    del_sql = _ALLOC_TBL.delete().where(
-        _ALLOC_TBL.c.consumer_id == consumer_id)
-    ctx.session.execute(del_sql)
-
-
-@db_api.placement_context_manager.writer
-def _delete_allocations_by_ids(ctx, alloc_ids):
-    """Deletes allocations having an internal id value in the set of supplied
-    IDs
-    """
-    del_sql = _ALLOC_TBL.delete().where(_ALLOC_TBL.c.id.in_(alloc_ids))
-    ctx.session.execute(del_sql)
+    query = """
+            MATCH (:CONSUMER {uuid: '%s'})-[u:USES]->()
+            DELETE u
+    """ % consumer_uuid
+    db.execute(query)
 
 
 def _check_capacity_exceeded(ctx, allocs):
@@ -94,91 +86,36 @@ def _check_capacity_exceeded(ctx, allocs):
                 Session
     :param allocs: List of `Allocation` objects to check
     """
-    # The SQL generated below looks like this:
-    # SELECT
-    #   rp.id,
-    #   rp.uuid,
-    #   rp.generation,
-    #   inv.resource_class_id,
-    #   inv.total,
-    #   inv.reserved,
-    #   inv.allocation_ratio,
-    #   allocs.used
-    # FROM resource_providers AS rp
-    # JOIN inventories AS i1
-    # ON rp.id = i1.resource_provider_id
-    # LEFT JOIN (
-    #    SELECT resource_provider_id, resource_class_id, SUM(used) AS used
-    #    FROM allocations
-    #    WHERE resource_class_id IN ($RESOURCE_CLASSES)
-    #    AND resource_provider_id IN ($RESOURCE_PROVIDERS)
-    #    GROUP BY resource_provider_id, resource_class_id
-    # ) AS allocs
-    # ON inv.resource_provider_id = allocs.resource_provider_id
-    # AND inv.resource_class_id = allocs.resource_class_id
-    # WHERE rp.id IN ($RESOURCE_PROVIDERS)
-    # AND inv.resource_class_id IN ($RESOURCE_CLASSES)
-    #
-    # We then take the results of the above and determine if any of the
-    # inventory will have its capacity exceeded.
-    rc_ids = set([rc_cache.RC_CACHE.id_from_string(a.resource_class)
-                  for a in allocs])
+    rc_names = set([a.resource_class for a in allocs])
     provider_uuids = set([a.resource_provider.uuid for a in allocs])
-    provider_ids = set([a.resource_provider.id for a in allocs])
-    usage = sa.select([_ALLOC_TBL.c.resource_provider_id,
-                       _ALLOC_TBL.c.resource_class_id,
-                       sql.func.sum(_ALLOC_TBL.c.used).label('used')])
-    usage = usage.where(
-        sa.and_(_ALLOC_TBL.c.resource_class_id.in_(rc_ids),
-                _ALLOC_TBL.c.resource_provider_id.in_(provider_ids)))
-    usage = usage.group_by(_ALLOC_TBL.c.resource_provider_id,
-                           _ALLOC_TBL.c.resource_class_id)
-    usage = sa.alias(usage, name='usage')
+    query = """
+            MATCH (rp:RESOURCE_PROVIDER)
+            WHERE rp.uuid IN %s
+            WITH rp
+            MATCH (rp)-[*]->(rc)
+            WHERE labels(rc)[0] IN %s
+            WITH rp, rc
+            OPTIONAL MATCH p=(cs:CONSUMER)-[:USES]->(rc)
+            WITH rp, rc, relationships(p)[0] AS allocs
+            WITH rp, rc, sum(allocs.amount) AS total_usages
+            RETURN rp, rc, labels(rc)[0] AS rc_name, total_usages
+    """ % (provider_uuids, rc_names)
+    result = db.execute(query)
 
-    inv_join = sql.join(
-        _RP_TBL, _INV_TBL,
-        sql.and_(_RP_TBL.c.id == _INV_TBL.c.resource_provider_id,
-                 _INV_TBL.c.resource_class_id.in_(rc_ids)))
-    primary_join = sql.outerjoin(
-        inv_join, usage,
-        sql.and_(
-            _INV_TBL.c.resource_provider_id == usage.c.resource_provider_id,
-            _INV_TBL.c.resource_class_id == usage.c.resource_class_id)
-    )
-    cols_in_output = [
-        _RP_TBL.c.id.label('resource_provider_id'),
-        _RP_TBL.c.uuid,
-        _RP_TBL.c.generation,
-        _INV_TBL.c.resource_class_id,
-        _INV_TBL.c.total,
-        _INV_TBL.c.reserved,
-        _INV_TBL.c.allocation_ratio,
-        _INV_TBL.c.min_unit,
-        _INV_TBL.c.max_unit,
-        _INV_TBL.c.step_size,
-        usage.c.used,
-    ]
-
-    sel = sa.select(cols_in_output).select_from(primary_join)
-    sel = sel.where(
-        sa.and_(_RP_TBL.c.id.in_(provider_ids),
-                _INV_TBL.c.resource_class_id.in_(rc_ids)))
-    records = ctx.session.execute(sel)
     # Create a map keyed by (rp_uuid, res_class) for the records in the DB
     usage_map = {}
     provs_with_inv = set()
-    for record in records:
-        map_key = (record['uuid'], record['resource_class_id'])
+    for record in result:
+        map_key = (record["rp"]["uuid"], record["rc_name"])
         if map_key in usage_map:
             raise KeyError("%s already in usage_map, bad query" % str(map_key))
         usage_map[map_key] = record
-        provs_with_inv.add(record["uuid"])
+        provs_with_inv.add(record["rp"]["uuid"])
     # Ensure that all providers have existing inventory
     missing_provs = provider_uuids - provs_with_inv
     if missing_provs:
-        class_str = ', '.join([rc_cache.RC_CACHE.string_from_id(rc_id)
-                               for rc_id in rc_ids])
-        provider_str = ', '.join(missing_provs)
+        class_str = ", ".join(rc_names)
+        provider_str = ", ".join(missing_provs)
         raise exception.InvalidInventory(
             resource_class=class_str, resource_provider=provider_str)
 
@@ -186,59 +123,62 @@ def _check_capacity_exceeded(ctx, allocs):
     rp_resource_class_sum = collections.defaultdict(
         lambda: collections.defaultdict(int))
     for alloc in allocs:
-        rc_id = rc_cache.RC_CACHE.id_from_string(alloc.resource_class)
+        rc_name = alloc.resource_class
         rp_uuid = alloc.resource_provider.uuid
         if rp_uuid not in res_providers:
             res_providers[rp_uuid] = alloc.resource_provider
         amount_needed = alloc.used
-        rp_resource_class_sum[rp_uuid][rc_id] += amount_needed
         # No use checking usage if we're not asking for anything
         if amount_needed == 0:
             continue
-        key = (rp_uuid, rc_id)
+        rp_resource_class_sum[rp_uuid][rc_name] += amount_needed
+        key = (rp_uuid, rc_name)
         try:
-            usage = usage_map[key]
+            usage_record = usage_map[key]
         except KeyError:
-            # The resource class at rc_id is not in the usage map.
+            # The resource class at rc_name is not in the usage map.
             raise exception.InvalidInventory(
                 resource_class=alloc.resource_class,
                 resource_provider=rp_uuid)
-        allocation_ratio = usage['allocation_ratio']
-        min_unit = usage['min_unit']
-        max_unit = usage['max_unit']
-        step_size = usage['step_size']
+        rc_record = usage_record["rc"]
+        allocation_ratio = rc_record["allocation_ratio"]
+        min_unit = rc_record["min_unit"]
+        max_unit = rc_record["max_unit"]
+        step_size = rc_record["step_size"]
+        total = rc_record["total"]
+        reserved = rc_record["reserved"]
 
         # check min_unit, max_unit, step_size
-        if (amount_needed < min_unit or amount_needed > max_unit or
-                amount_needed % step_size != 0):
+        if ((amount_needed < min_unit) or (amount_needed > max_unit) or
+                (amount_needed % step_size)):
             LOG.warning(
-                "Allocation for %(rc)s on resource provider %(rp)s "
-                "violates min_unit, max_unit, or step_size. "
-                "Requested: %(requested)s, min_unit: %(min_unit)s, "
-                "max_unit: %(max_unit)s, step_size: %(step_size)s",
-                {'rc': alloc.resource_class,
-                 'rp': rp_uuid,
-                 'requested': amount_needed,
-                 'min_unit': min_unit,
-                 'max_unit': max_unit,
-                 'step_size': step_size})
+                    "Allocation for %(rc)s on resource provider %(rp)s "
+                    "violates min_unit, max_unit, or step_size. "
+                    "Requested: %(requested)s, min_unit: %(min_unit)s, "
+                    "max_unit: %(max_unit)s, step_size: %(step_size)s",
+                    {"rc": alloc.resource_class,
+                     "rp": rp_uuid,
+                     "requested": amount_needed,
+                     "min_unit": min_unit,
+                     "max_unit": max_unit,
+                     "step_size": step_size})
             raise exception.InvalidAllocationConstraintsViolated(
-                resource_class=alloc.resource_class,
-                resource_provider=rp_uuid)
+                    resource_class=alloc.resource_class,
+                    resource_provider=rp_uuid)
 
-        # usage["used"] can be returned as None
-        used = usage['used'] or 0
-        capacity = (usage['total'] - usage['reserved']) * allocation_ratio
+        # Should never be null, but just in case...
+        used = usage_record["total_usages"] or 0
+        capacity = (total - reserved) * allocation_ratio
         if (capacity < (used + amount_needed) or
                 capacity < (used + rp_resource_class_sum[rp_uuid][rc_id])):
             LOG.warning(
                 "Over capacity for %(rc)s on resource provider %(rp)s. "
                 "Needed: %(needed)s, Used: %(used)s, Capacity: %(cap)s",
-                {'rc': alloc.resource_class,
-                 'rp': rp_uuid,
-                 'needed': amount_needed,
-                 'used': used,
-                 'cap': capacity})
+                {"rc": alloc.resource_class,
+                 "rp": rp_uuid,
+                 "needed": amount_needed,
+                 "used": used,
+                 "cap": capacity})
             raise exception.InvalidAllocationCapacityExceeded(
                 resource_class=alloc.resource_class,
                 resource_provider=rp_uuid)
@@ -421,9 +361,9 @@ def _set_allocations(context, allocs):
     # First delete any existing allocations for any consumers. This
     # provides a clean slate for the consumers mentioned in the list of
     # allocations being manipulated.
-    consumer_ids = set(alloc.consumer.uuid for alloc in allocs)
-    for consumer_id in consumer_ids:
-        _delete_allocations_for_consumer(context, consumer_id)
+    consumer_uuids = set(alloc.consumer.uuid for alloc in allocs)
+    for consumer_uuid in consumer_uuids:
+        _delete_allocations_for_consumer(context, consumer_uuid)
 
     # Before writing any allocation records, we check that the submitted
     # allocations do not cause any inventory capacity to be exceeded for
@@ -442,13 +382,13 @@ def _set_allocations(context, allocs):
     # /allocations does not allow empty allocations. When POST /allocations
     # is implemented it will for the special case of atomically setting and
     # removing different allocations in the same request.
-    # _check_capacity_exceeded will raise a ResourceClassNotFound # if any
+    # _check_capacity_exceeded will raise a ResourceClassNotFound if any
     # allocation is using a resource class that does not exist.
     visited_consumers = {}
     visited_rps = _check_capacity_exceeded(context, allocs)
     for alloc in allocs:
-        if alloc.consumer.id not in visited_consumers:
-            visited_consumers[alloc.consumer.id] = alloc.consumer
+        if alloc.consumer.uuid not in visited_consumers:
+            visited_consumers[alloc.consumer.uuid] = alloc.consumer
 
         # If alloc.used is set to zero that is a signal that we don't want
         # to (re-)create any allocations for this resource class.
@@ -456,16 +396,20 @@ def _set_allocations(context, allocs):
         # continue
         if alloc.used == 0:
             continue
-        consumer_id = alloc.consumer.uuid
+        consumer_uuid = alloc.consumer.uuid
         rp = alloc.resource_provider
-        rc_id = rc_cache.RC_CACHE.id_from_string(alloc.resource_class)
-        ins_stmt = _ALLOC_TBL.insert().values(
-            resource_provider_id=rp.id,
-            resource_class_id=rc_id,
-            consumer_id=consumer_id,
-            used=alloc.used)
-        res = context.session.execute(ins_stmt)
-        alloc.id = res.lastrowid
+        rc_name =alloc.resource_class
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+                WITH rp
+                MATCH (rp)-[:PROVIDES]->(rc:%s)
+                WITH rp, rc
+                MATCH (cs:CONSUMER {uuid: '%s'})
+                WITH rp, rc, cs
+                CREATE p=(cs)-[:USES {amount: %s}->(rc)
+                RETURN p
+        """ % (rp.uuid, rc_name, consumer_uuid)
+        result = db.execute(query)
 
     # Generation checking happens here. If the inventory for this resource
     # provider changed out from under us, this will raise a
@@ -483,39 +427,33 @@ def _set_allocations(context, allocs):
     cons_with_allocs = set(a.consumer.uuid for a in allocs if a.used > 0)
     all_cons = set(c.uuid for c in visited_consumers.values())
     consumers_to_check = all_cons - cons_with_allocs
-    consumer_obj.delete_consumers_if_no_allocations(
-        context, consumers_to_check)
+    consumer_obj.delete_consumers_if_no_allocations(context,
+            consumers_to_check)
 
 
 def get_all_by_resource_provider(context, rp):
-    _create_incomplete_consumers_for_provider(context, rp.id)
-    db_allocs = _get_allocations_by_provider_id(context, rp.id)
+    _create_incomplete_consumers_for_provider(context, rp.uuid)
+    db_allocs = _get_allocations_by_provider_uuid(context, rp.uuid)
     # Build up a list of Allocation objects, setting the Allocation object
     # fields to the same-named database record field we got from
-    # _get_allocations_by_provider_id(). We already have the
+    # _get_allocations_by_provider_uuid(). We already have the
     # ResourceProvider object so we just pass that object to the Allocation
     # object constructor as-is
     objs = []
     for rec in db_allocs:
         consumer = consumer_obj.Consumer(
-            context, id=rec['consumer_id'],
-            uuid=rec['consumer_uuid'],
-            generation=rec['consumer_generation'],
-            project=project_obj.Project(
-                context, id=rec['project_id'],
-                external_id=rec['project_external_id']),
-            user=user_obj.User(
-                context, id=rec['user_id'],
-                external_id=rec['user_external_id']))
+                context, uuid=rec["consumer_uuid"],
+                generation=rec["consumer_generation"],
+                project=project_obj.Project(uuid=rec["project_uuid"]),
+                user=user_obj.User(context, uuid=rec["user_uuid"]))
         objs.append(
             Allocation(
-                id=rec['id'], resource_provider=rp,
-                resource_class=rc_cache.RC_CACHE.string_from_id(
-                    rec['resource_class_id']),
+                resource_provider=rp,
+                resource_class=rec["rc_name"],
                 consumer=consumer,
-                used=rec['used'],
-                created_at=rec['created_at'],
-                updated_at=rec['updated_at']))
+                used=rec["used"],
+                created_at=rec["created_at"],
+                updated_at=rec["updated_at"]))
     return objs
 
 
@@ -530,15 +468,10 @@ def get_all_by_consumer_id(context, consumer_id):
     # since we looked up by consumer ID)
     db_first = db_allocs[0]
     consumer = consumer_obj.Consumer(
-        context, id=db_first['consumer_id'],
-        uuid=db_first['consumer_uuid'],
+        context, uuid=db_first['consumer_uuid'],
         generation=db_first['consumer_generation'],
-        project=project_obj.Project(
-            context, id=db_first['project_id'],
-            external_id=db_first['project_external_id']),
-        user=user_obj.User(
-            context, id=db_first['user_id'],
-            external_id=db_first['user_external_id']))
+        project=project_obj.Project(context, uuid=db_first['project_uuid']),
+        user=user_obj.User(context, uuid=db_first['user_uuid']))
 
     # Build up a list of Allocation objects, setting the Allocation object
     # fields to the same-named database record field we got from
@@ -550,19 +483,16 @@ def get_all_by_consumer_id(context, consumer_id):
     # fields returned by _get_allocations_by_consumer_id().
     alloc_list = [
         Allocation(
-            id=rec['id'],
             resource_provider=rp_obj.ResourceProvider(
                 context,
-                id=rec['resource_provider_id'],
-                uuid=rec['resource_provider_uuid'],
-                name=rec['resource_provider_name'],
-                generation=rec['resource_provider_generation']),
-            resource_class=rc_cache.RC_CACHE.string_from_id(
-                rec['resource_class_id']),
+                uuid=rec["resource_provider_uuid"],
+                name=rec["resource_provider_name"],
+                generation=rec["resource_provider_generation"]),
+            resource_class=rec["resource_class"],
             consumer=consumer,
-            used=rec['used'],
-            created_at=rec['created_at'],
-            updated_at=rec['updated_at'])
+            used=rec["used"],
+            created_at=rec["created_at"],
+            updated_at=rec["updated_at"])
         for rec in db_allocs
     ]
     return alloc_list
@@ -590,15 +520,15 @@ def replace_all(context, alloc_list):
             _set_allocations(context, alloc_list)
             break
         except exception.ResourceProviderConcurrentUpdateDetected:
-            LOG.debug('Retrying allocations write on resource provider '
-                      'generation conflict')
+            LOG.debug("Retrying allocations write on resource provider "
+                      "generation conflict")
             # We only want to reload each unique resource provider once.
             alloc_rp_uuids = set(
-                alloc.resource_provider.uuid for alloc in alloc_list)
+                    alloc.resource_provider.uuid for alloc in alloc_list)
             seen_rps = {}
             for rp_uuid in alloc_rp_uuids:
                 seen_rps[rp_uuid] = rp_obj.ResourceProvider.get_by_uuid(
-                    context, rp_uuid)
+                        context, rp_uuid)
             for alloc in alloc_list:
                 rp_uuid = alloc.resource_provider.uuid
                 alloc.resource_provider = seen_rps[rp_uuid]
@@ -609,14 +539,13 @@ def replace_all(context, alloc_list):
         # Attempting to extract specific consumer or resource provider
         # information from the allocations is not coherent as this
         # could be multiple consumers and providers.
-        LOG.warning('Exceeded retry limit of %d on allocations write',
+        LOG.warning("Exceeded retry limit of %d on allocations write",
                     RP_CONFLICT_RETRY_COUNT)
         raise exception.ResourceProviderConcurrentUpdateDetected()
 
 
 def delete_all(context, alloc_list):
     consumer_uuids = set(alloc.consumer.uuid for alloc in alloc_list)
-    alloc_ids = [alloc.id for alloc in alloc_list]
-    _delete_allocations_by_ids(context, alloc_ids)
-    consumer_obj.delete_consumers_if_no_allocations(
-        context, consumer_uuids)
+    for consumer_uuid in consumer_uuids:
+        _delete_allocations_for_consumer(context, consumer_uuid)
+    consumer_obj.delete_consumers_if_no_allocations(context, consumer_uuids)

@@ -19,13 +19,13 @@ from placement.tests.functional.db import test_base as tb
 class UserTestCase(tb.PlacementDbBaseTestCase):
     def test_non_existing_user(self):
         self.assertRaises(
-            exception.UserNotFound, user_obj.User.get_by_external_id,
+            exception.UserNotFound, user_obj.User.get_by_uuid,
             self.ctx, uuids.non_existing_user)
 
     def test_create_and_get(self):
         u = user_obj.User(self.ctx, external_id='another-user')
         u.create()
-        u = user_obj.User.get_by_external_id(self.ctx, 'another-user')
+        u = user_obj.User.get_by_uuid(self.ctx, 'another-user')
         # User ID == 1 is fake-user created in setup
         self.assertEqual(2, u.id)
         self.assertRaises(exception.UserExists, u.create)

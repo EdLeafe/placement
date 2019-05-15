@@ -11,13 +11,10 @@
 #    under the License.
 
 from oslo_db import exception as db_exc
-import sqlalchemy as sa
 
-from placement.db.sqlalchemy import models
+from placement.db import graph_db as db
 from placement import db_api
 from placement import exception
-
-PROJECT_TBL = models.Project.__table__
 
 
 @db_api.placement_context_manager.writer
@@ -25,66 +22,63 @@ def ensure_incomplete_project(ctx):
     """Ensures that a project record is created for the "incomplete consumer
     project". Returns the internal ID of that record.
     """
-    incomplete_id = ctx.config.placement.incomplete_consumer_project_id
-    sel = sa.select([PROJECT_TBL.c.id]).where(
-        PROJECT_TBL.c.external_id == incomplete_id)
-    res = ctx.session.execute(sel).fetchone()
-    if res:
-        return res[0]
-    ins = PROJECT_TBL.insert().values(external_id=incomplete_id)
-    res = ctx.session.execute(ins)
-    return res.inserted_primary_key[0]
+    incomplete_uuid = ctx.config.placement.incomplete_consumer_project_id
+    query = """
+            MERGE (pj:PROJECT {uuid: '%s'})
+            RETURN pj
+    """ % incomplete_uuid
+    db.execute(query)
+    return incomplete_uuid
 
 
 @db_api.placement_context_manager.reader
-def _get_project_by_external_id(ctx, external_id):
-    projects = sa.alias(PROJECT_TBL, name="p")
-    cols = [
-        projects.c.id,
-        projects.c.external_id,
-        projects.c.updated_at,
-        projects.c.created_at
-    ]
-    sel = sa.select(cols)
-    sel = sel.where(projects.c.external_id == external_id)
-    res = ctx.session.execute(sel).fetchone()
-    if not res:
-        raise exception.ProjectNotFound(external_id=external_id)
-
-    return dict(res)
+def _get_project_by_uuid(ctx, uuid):
+    query = """
+            MATCH (pj:PROJECT {uuid: '%s'})
+            RETURN pj
+    """ % uuid
+    result = db.execute(query)
+    if not result:
+        raise exception.ProjectNotFound(uuid=uuid)
+    rec = db.pythonize(result[0]["pj"])
+    return {"uuid": rec.uuid,
+            "updated_at": rec.updated_at,
+            "created_at": rec.created_at,
+            }
 
 
 class Project(object):
-
-    def __init__(self, context, id=None, external_id=None, updated_at=None,
-                 created_at=None):
+    def __init__(self, context, uuid=None, updated_at=None, created_at=None):
         self._context = context
-        self.id = id
-        self.external_id = external_id
+        self.uuid = uuid
         self.updated_at = updated_at
         self.created_at = created_at
 
     @staticmethod
     def _from_db_object(ctx, target, source):
         target._context = ctx
-        target.id = source['id']
-        target.external_id = source['external_id']
+        target.uuid = source['uuid']
         target.updated_at = source['updated_at']
         target.created_at = source['created_at']
         return target
 
     @classmethod
-    def get_by_external_id(cls, ctx, external_id):
-        res = _get_project_by_external_id(ctx, external_id)
+    def get_by_uuid(cls, ctx, uuid):
+        res = _get_project_by_uuid(ctx, uuid)
         return cls._from_db_object(ctx, cls(ctx), res)
 
     def create(self):
         @db_api.placement_context_manager.writer
         def _create_in_db(ctx):
-            db_obj = models.Project(external_id=self.external_id)
+            query = """
+                    CREATE (pj:PROJECT {uuid: '%s', created_at: timestamp(),
+                        updated_at: timestamp()})
+                    RETURN pj
+            """ % self.uuid
             try:
-                db_obj.save(ctx.session)
-            except db_exc.DBDuplicateEntry:
-                raise exception.ProjectExists(external_id=self.external_id)
+                result = db.execute(query)
+            except db.ClientError:
+                raise exception.ProjectExists(uuid=self.uuid)
+            db_obj = db.pythonize(result[0]["pj"])
             self._from_db_object(ctx, self, db_obj)
         _create_in_db(self._context)

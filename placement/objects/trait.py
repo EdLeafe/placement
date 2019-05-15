@@ -240,7 +240,7 @@ def get_traits_by_provider_tree(ctx, root_uuids):
             rp_traits = _traits_from_props(rp_props)
             rp_traits[rp_uuid].update(rp_traits)
     # Convert the sets back to lists
-    rp_traits = {k, list(v) for k, v in rp_traits.items()}
+    rp_traits = {k: list(v) for k, v in rp_traits.items()}
     return rp_traits
 
 
