@@ -97,6 +97,7 @@ def get_total_usages(req):
 
     util.validate_query_params(req, schema.GET_USAGES_SCHEMA_1_9)
 
+    # TODO(edleafe): Ensure that these are UUIDs, and not integer IDs
     project_id = req.GET.get('project_id')
     user_id = req.GET.get('user_id')
 

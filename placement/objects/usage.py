@@ -10,21 +10,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from sqlalchemy import func
-from sqlalchemy import sql
-
-from placement.db.sqlalchemy import models
+from placement.db import graph_db as db
 from placement import db_api
-from placement import resource_class_cache as rc_cache
 
 
 class Usage(object):
-
-    def __init__(self, resource_class=None, resource_class_id=None, usage=0):
+    def __init__(self, resource_class=None, usage=0):
         self.resource_class = resource_class
-        if resource_class_id is not None:
-            self.resource_class = rc_cache.RC_CACHE.string_from_id(
-                resource_class_id)
         self.usage = int(usage)
 
 
@@ -36,44 +28,35 @@ def get_all_by_resource_provider_uuid(context, rp_uuid):
 
 def get_all_by_project_user(context, project_id, user_id=None):
     """Get a list of Usage objects filtered by project and (optional) user."""
-    usage_list = _get_all_by_project_user(context, project_id,
-                                          user_id=user_id)
+    usage_list = _get_all_by_project_user(context, project_id, user_id=user_id)
     return [Usage(**db_item) for db_item in usage_list]
 
 
 @db_api.placement_context_manager.reader
 def _get_all_by_resource_provider_uuid(context, rp_uuid):
-    query = (context.session.query(models.Inventory.resource_class_id,
-             func.coalesce(func.sum(models.Allocation.used), 0))
-             .join(models.ResourceProvider,
-                   models.Inventory.resource_provider_id ==
-                   models.ResourceProvider.id)
-             .outerjoin(models.Allocation,
-                        sql.and_(models.Inventory.resource_provider_id ==
-                                 models.Allocation.resource_provider_id,
-                                 models.Inventory.resource_class_id ==
-                                 models.Allocation.resource_class_id))
-             .filter(models.ResourceProvider.uuid == rp_uuid)
-             .group_by(models.Inventory.resource_class_id))
-    result = [dict(resource_class_id=item[0], usage=item[1])
-              for item in query.all()]
-    return result
+    query = """
+            MATCH (rp {uuid: '%s'})-[*0..99]->(:RESOURCE_PROVIDER)-
+                [:PROVIDES]->(rc)
+            WITH rc
+            MATCH p=(cs:CONSUMER)-[:USES]->(rc)
+            WITH labels(rc)[0] AS rcname, relationships(p)[0] AS usage
+            RETURN rcname, sum(usage.amount) AS used
+    """ % rp_uuid
+    result = db.execute(query)
+    return {rec["rcname"]: rec["used"] for rec in result}
 
 
 @db_api.placement_context_manager.reader
 def _get_all_by_project_user(context, project_id, user_id=None):
-    query = (context.session.query(models.Allocation.resource_class_id,
-             func.coalesce(func.sum(models.Allocation.used), 0))
-             .join(models.Consumer,
-                   models.Allocation.consumer_id == models.Consumer.uuid)
-             .join(models.Project,
-                   models.Consumer.project_id == models.Project.id)
-             .filter(models.Project.external_id == project_id))
     if user_id:
-        query = query.join(models.User,
-                           models.Consumer.user_id == models.User.id)
-        query = query.filter(models.User.external_id == user_id)
-    query = query.group_by(models.Allocation.resource_class_id)
-    result = [dict(resource_class_id=item[0], usage=item[1])
-              for item in query.all()]
-    return result
+        match = "MATCH p=(:USER {uuid: '%s'})-[:USES]->(rc)" % user_id
+    else:
+        match = "MATCH p=(:PROJECT {uuid: '%s'})-[*]->()-[:USES]->(rc)"
+        match = match % project_id
+    query = """
+            %s
+            WITH labels(rc)[0] AS rcname, relationships(p)[-1] AS used
+            RETURN rcname, sum(used.amount) AS usage
+    """ % match
+    result = db.execute(query)
+    return {rec["rcname"]: rec["usage"] for rec in result}
