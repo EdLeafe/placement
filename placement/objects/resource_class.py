@@ -18,16 +18,12 @@ from oslo_db import exception as db_exc
 from oslo_log import log as logging
 from oslo_utils import timeutils
 import six
-import sqlalchemy as sa
-from sqlalchemy import func
 
 from placement.db import graph_db as db
-from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import exception
 from placement import resource_class_cache as rc_cache
 
-_RC_TBL = models.ResourceClass.__table__
 _RESOURCE_CLASSES_LOCK = 'resource_classes_sync'
 _RESOURCE_CLASSES_SYNCED = False
 
@@ -47,10 +43,8 @@ class ResourceClass(object):
     # infinite loop.
     RESOURCE_CREATE_RETRY_COUNT = 100
 
-    def __init__(self, context, id=None, name=None, updated_at=None,
-                 created_at=None):
+    def __init__(self, context, name=None, updated_at=None, created_at=None):
         self._context = context
-        self.id = id
         self.name = name
         self.updated_at = updated_at
         self.created_at = created_at
@@ -58,7 +52,6 @@ class ResourceClass(object):
     @staticmethod
     def _from_db_object(context, target, source):
         target._context = context
-        target.id = source['id']
         target.name = source['name']
         target.updated_at = source['updated_at']
         target.created_at = source['created_at']
@@ -72,9 +65,16 @@ class ResourceClass(object):
 
         :raises: ResourceClassNotFound if no such resource class was found
         """
-        rc = rc_cache.RC_CACHE.all_from_string(name)
-        obj = cls(context, id=rc['id'], name=rc['name'],
-                  updated_at=rc['updated_at'], created_at=rc['created_at'])
+        query = """
+                MATCH (rc:RESOURCE_CLASS {name: '%s'})
+                RETURN rc
+        """ % name
+        result = db.execute(q)
+        if not result:
+            raise exception.ResourceClassNotFound(resource_class=name)
+        rec = result[0]
+        obj = cls(context, name=name, updated_at=rec["updated_at"],
+                created_at=rec["created_at"])
         return obj
 
     @staticmethod
@@ -82,30 +82,24 @@ class ResourceClass(object):
     def _get_next_id(context):
         """Utility method to grab the next resource class identifier to use for
          user-defined resource classes.
+
+        NOTE: to be removed once graph conversion is complete. Resource classes
+        are identified by name, not IDs.
         """
-        query = context.session.query(func.max(models.ResourceClass.id))
-        max_id = query.one()[0]
-        if not max_id or max_id < ResourceClass.MIN_CUSTOM_RESOURCE_CLASS_ID:
-            return ResourceClass.MIN_CUSTOM_RESOURCE_CLASS_ID
-        else:
-            return max_id + 1
+        return -1
 
     def create(self):
-        if self.id is not None:
-            raise exception.ObjectActionError(action='create',
-                                              reason='already created')
         if not self.name:
-            raise exception.ObjectActionError(action='create',
-                                              reason='name is required')
+            raise exception.ObjectActionError(action="create",
+                                              reason="name is required")
         if self.name in orc.STANDARDS:
             raise exception.ResourceClassExists(resource_class=self.name)
-
         if not self.name.startswith(orc.CUSTOM_NAMESPACE):
             raise exception.ObjectActionError(
-                action='create',
-                reason='name must start with ' + orc.CUSTOM_NAMESPACE)
+                action="create",
+                reason="name must start with " + orc.CUSTOM_NAMESPACE)
         updates = {}
-        for field in ['name', 'updated_at', 'created_at']:
+        for field in ["name", "updated_at", "created_at"]:
             value = getattr(self, field, None)
             if value:
                 updates[field] = value
@@ -122,10 +116,7 @@ class ResourceClass(object):
                 self._from_db_object(self._context, self, rc)
                 break
             except db_exc.DBDuplicateEntry as e:
-                if 'id' in e.columns:
-                    # Race condition for ID creation; try again
-                    continue
-                # The duplication is on the other unique column, 'name'. So do
+                # The duplication is on the other unique column, "name". So do
                 # not retry; raise the exception immediately.
                 raise exception.ResourceClassExists(resource_class=self.name)
         else:
@@ -135,72 +126,78 @@ class ResourceClass(object):
             # specific situation occurred.
             LOG.warning("Exceeded retry limit on ID generation while "
                         "creating ResourceClass %(name)s",
-                        {'name': self.name})
+                        {"name": self.name})
             msg = "creating resource class %s" % self.name
             raise exception.MaxDBRetriesExceeded(action=msg)
 
     @staticmethod
     @db_api.placement_context_manager.writer
     def _create_in_db(context, updates):
-        next_id = ResourceClass._get_next_id(context)
-        rc = models.ResourceClass()
-        rc.update(updates)
-        rc.id = next_id
-        context.session.add(rc)
-        return rc
+        query = """
+                CREATE (rc:RESOURCE_CLASS {name: '%s', created_at: '%s',
+                    updated_at: '%s'})
+                RETURN rc
+        """ % (updates["name"], updates["created_at"], updates["updated_at"])
+        try:
+            result = db.execute(query)
+        except db.ClientError:
+            raise db_exc.DBDuplicateEntry()
+        return result[0]["rc"]
 
     def destroy(self):
-        if self.id is None:
-            raise exception.ObjectActionError(action='destroy',
-                                              reason='ID attribute not found')
         # Never delete any standard resource class.
-        if self.id < ResourceClass.MIN_CUSTOM_RESOURCE_CLASS_ID:
+        if not self.name.startswith(orc.CUSTOM_NAMESPACE):
             raise exception.ResourceClassCannotDeleteStandard(
-                resource_class=self.name)
-
+                    resource_class=self.name)
         self._destroy(self._context, self.id, self.name)
-        rc_cache.RC_CACHE.clear()
 
     @staticmethod
     @db_api.placement_context_manager.writer
     def _destroy(context, _id, name):
-        # Don't delete the resource class if it is referred to in the
-        # inventories table.
-        num_inv = context.session.query(models.Inventory).filter(
-            models.Inventory.resource_class_id == _id).count()
-        if num_inv:
+        # Don't delete the resource class if it exists as being provided by a
+        # resource provider.
+        query = """
+                MATCH ()-[:PROVIDES]->(rc)
+                WHERE labels(rc)[0] = '%s'
+                RETURN rc
+        """
+        result = db.execute(query)
+        if result:
             raise exception.ResourceClassInUse(resource_class=name)
 
-        res = context.session.query(models.ResourceClass).filter(
-            models.ResourceClass.id == _id).delete()
-        if not res:
-            raise exception.NotFound()
+        query = """
+                MATCH (rc:RESOURCE_CLASS {name: '%s'})
+                WITH rc
+                DELETE rc
+        """
+        result = db.execute(query)
 
     def save(self):
-        if self.id is None:
-            raise exception.ObjectActionError(action='save',
-                                              reason='ID attribute not found')
+        # Never update any standard resource class.
+        if not self.name.startswith(orc.CUSTOM_NAMESPACE):
+            raise exception.ResourceClassCannotUpdateStandard(
+                resource_class=self.name)
         updates = {}
-        for field in ['name', 'updated_at', 'created_at']:
+        for field in ["name", "updated_at", "created_at"]:
             value = getattr(self, field, None)
             if value:
                 updates[field] = value
-        # Never update any standard resource class.
-        if self.id < ResourceClass.MIN_CUSTOM_RESOURCE_CLASS_ID:
-            raise exception.ResourceClassCannotUpdateStandard(
-                resource_class=self.name)
-        self._save(self._context, self.id, self.name, updates)
-        rc_cache.RC_CACHE.clear()
+        self._save(self._context, self.name, updates)
 
     @staticmethod
     @db_api.placement_context_manager.writer
-    def _save(context, id, name, updates):
-        db_rc = context.session.query(models.ResourceClass).filter_by(
-            id=id).first()
-        db_rc.update(updates)
+    def _save(context, name, updates):
+        update_list = ["rc.%s = '%s'" % (k, v) for k, v in updates.items()]
+        update_str = ", ".join(update_list)
+        query = """
+                MATCH (rc:RESOURCE_CLASS {name: '%s'})
+                WITH rc
+                SET %s
+                RETURN rc
+        """ % (name, update_str)
         try:
-            db_rc.save(context.session)
-        except db_exc.DBDuplicateEntry:
+            result = db.execute(query)
+        except db.ClientError:
             raise exception.ResourceClassExists(resource_class=name)
 
 
@@ -218,52 +215,36 @@ def ensure_sync(ctx):
 @db_api.placement_context_manager.reader
 def get_all(context):
     """Get a list of all the resource classes in the database."""
-    resource_classes = context.session.query(models.ResourceClass).all()
-    return [ResourceClass(context, **rc) for rc in resource_classes]
+    query = """
+            MATCH (rc:RESOURCE_CLASS)
+            RETURN rc
+    """
+    result = db.execute(query)
+    return [ResourceClass(context, **rc) for rc in result["rc"]]
 
 
 @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 @db_api.placement_context_manager.writer
 def _resource_classes_sync(ctx):
     # Create a set of all resource class in the os_resource_classes library.
-    query = "MATCH (rc:RESOURCE_CLASS) RETURN rc.name AS name"
+    query = """
+            MATCH (rc:RESOURCE_CLASS)
+            RETURN rc.name AS name
+    """
     result = db.execute(query)
-    gdb_classes = [res["name"] for res in result]
-
-    sel = sa.select([_RC_TBL.c.name])
-    res = ctx.session.execute(sel).fetchall()
-    db_classes = [r[0] for r in res if not orc.is_custom(r[0])]
+    db_std_classes = [res["name"] for res in result
+            if not orc.is_custom(res["name"])]
     LOG.debug("Found existing resource classes in db: %s", db_classes)
     # Determine those resource clases which are in os_resource_classes but not
     # currently in the database, and insert them.
-    batch_args = [{'name': six.text_type(name), 'id': index}
-                  for index, name in enumerate(orc.STANDARDS)
-                  if name not in db_classes]
-    gbatch_args = [{'name': six.text_type(name), 'id': index}
-                  for index, name in enumerate(orc.STANDARDS)
-                  if name not in gdb_classes]
-
-    tm_now = timeutils.utcnow(with_timezone=True).strftime("%Y-%m-%d %H:%M:%S %Z")
-    mrg = "MERGE (:RESOURCE_CLASS {name: '%s', updated_at: '%s', created_at: '%s'})"
-    merges = []
-    for arg in gbatch_args:
-        merges.append(mrg % (arg["name"], tm_now, tm_now))
-    merges.append("RETURN 1")
-    query = "\n".join(merges)
-    result = db.execute(query)
-
-    ins = _RC_TBL.insert()
-    if batch_args:
-        conn = ctx.session.connection()
-        if conn.engine.dialect.name == 'mysql':
-            # We need to do a literal insert of 0 to preserve the order
-            # of the resource class ids from the previous style of
-            # managing them. In some mysql settings a 0 is the same as
-            # "give me a default key".
-            conn.execute("SET SESSION SQL_MODE='NO_AUTO_VALUE_ON_ZERO'")
-        try:
-            ctx.session.execute(ins, batch_args)
-            LOG.debug("Synced resource_classes from os_resource_classes: %s",
-                      batch_args)
-        except db_exc.DBDuplicateEntry:
+    missing_rc_names = [name for name in orc.STANDARDS
+            if name not in db_std_classes]
+    query = """
+            UNWIND %s AS rcname
+            CREATE (:RESOURCE_CLASS {name: rcname, created_at: timestamp(),
+                updated_at: timestamp()})
+    """ % missing_rc_names
+    try:
+        result = db.execute(query)
+    except db_exc.DBDuplicateEntry:
             pass  # some other process sync'd, just ignore
