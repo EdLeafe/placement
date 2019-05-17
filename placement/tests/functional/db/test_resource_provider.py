@@ -489,25 +489,6 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
         self.assertRaises(exception.NotFound,
                           created_resource_provider.destroy)
 
-    def test_destroy_foreign_key(self):
-        """This tests bug #1739571."""
-
-        def emulate_rp_mysql_delete(func):
-            def wrapped(context, _id):
-                query = context.session.query(models.ResourceProvider)
-                query = query.filter(models.ResourceProvider.id == _id)
-                rp = query.first()
-                self.assertIsNone(rp.root_provider_id)
-                return func(context, _id)
-            return wrapped
-
-        emulated = emulate_rp_mysql_delete(rp_obj._delete_rp_record)
-
-        rp = self._create_provider(uuidsentinel.fk)
-
-        with mock.patch.object(rp_obj, '_delete_rp_record', emulated):
-            rp.destroy()
-
     def test_destroy_allocated_resource_provider_fails(self):
         rp, allocation = self._make_allocation(tb.DISK_INVENTORY,
                                                tb.DISK_ALLOCATION)

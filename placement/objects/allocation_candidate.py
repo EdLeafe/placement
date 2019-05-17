@@ -480,7 +480,7 @@ def _alloc_candidates_single_provider(ctx, requested_resources, rp_tuples):
         traits = [trait.name for trait in rp_summary.traits]
         if os_traits.MISC_SHARES_VIA_AGGREGATE in traits:
             anchors = set([p[1] for p in rp_obj.anchors_for_sharing_providers(
-                ctx, [rp_summary.resource_provider.id])])
+                ctx, [rp_summary.resource_provider.uuid])])
             for anchor in anchors:
                 # We already added self
                 if anchor == rp_summary.resource_provider.root_provider_uuid:

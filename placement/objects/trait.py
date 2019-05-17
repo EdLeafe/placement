@@ -20,14 +20,9 @@ from oslo_log import log as logging
 import six
 
 from placement.db import graph_db as db
-from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import exception
 
-
-_RP_TBL = models.ResourceProvider.__table__
-_RP_TRAIT_TBL = models.ResourceProviderTrait.__table__
-_TRAIT_TBL = models.Trait.__table__
 _TRAIT_LOCK = 'trait_sync'
 _TRAITS_SYNCED = False
 

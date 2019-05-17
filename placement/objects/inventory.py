@@ -13,12 +13,8 @@
 import six
 
 from placement.db import graph_db as db
-from placement.db.sqlalchemy import models
 from placement import db_api
 from placement import resource_class_cache as rc_cache
-
-
-_INV_TBL = models.Inventory.__table__
 
 
 class Inventory(object):
