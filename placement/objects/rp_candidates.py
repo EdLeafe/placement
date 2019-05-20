@@ -14,14 +14,14 @@
 import collections
 
 
-RPCandidate = collections.namedtuple('RPCandidates', 'id root_id rc_id')
+RPCandidate = collections.namedtuple("RPCandidates", "uuid root_uuid rc_name")
 
 
 class RPCandidateList(object):
     """Helper class to manage allocation candidate resource providers list,
     RPCandidates, which consists of three-tuples with the first element being
-    the resource provider ID, the second element being the root provider ID
-    and the third being resource class ID.
+    the resource provider UUID, the second element being the root provider
+    UUID, and the third being resource class name.
     """
     def __init__(self, rp_candidates=None):
         self.rp_candidates = rp_candidates or set()
@@ -50,52 +50,54 @@ class RPCandidateList(object):
             self.rp_candidates |= other.rp_candidates
             self.filter_by_tree(trees_in_both)
 
-    def add_rps(self, rps, rc_id):
+    def add_rps(self, rps, rc_name):
         """Add given resource providers to the candidate list.
 
-        :param rps: tuples of (resource provider ID, anchor root provider ID)
-        :param rc_id: ID of the class of resource provided by these resource
-                      providers
+        :param rps: tuples of (resource provider UUID,
+                    anchor root provider UUID)
+        :param rc_name: Name of the class of resource provided by these
+                        resource providers
         """
         self.rp_candidates |= set(
-            RPCandidate(id=rp[0], root_id=rp[1], rc_id=rc_id) for rp in rps)
+                RPCandidate(uuid=rp[0], root_uuid=rp[1], rc_name=rc_name)
+                for rp in rps)
 
     def filter_by_tree(self, tree_root_ids):
         """Filter the candidates by given trees"""
         self.rp_candidates = set(
-            p for p in self.rp_candidates if p.root_id in tree_root_ids)
+            p for p in self.rp_candidates if p.root_uuid in tree_root_ids)
 
     def filter_by_rp(self, rptuples):
         """Filter the candidates by given resource provider"""
         self.rp_candidates = set(
-            p for p in self.rp_candidates if (p.id, p.root_id) in rptuples)
+            p for p in self.rp_candidates if (p.uuid, p.root_uuid) in rptuples)
 
-    def filter_by_rp_or_tree(self, rp_ids):
+    def filter_by_rp_or_tree(self, rp_uuids):
         """Filter the candidates out if neither itself nor its root is in
         given resource providers
         """
-        self.rp_candidates = set(
-            p for p in self.rp_candidates if set([p.id, p.root_id]) & rp_ids)
+        self.rp_candidates = set(p for p in self.rp_candidates
+                if set([p.uuid, p.root_uuid]) & rp_uuids)
 
-    def filter_by_rp_nor_tree(self, rp_ids):
+    def filter_by_rp_nor_tree(self, rp_uuids):
         """Filter the candidates out if either itself or its root is in
         given resource providers
         """
         self.rp_candidates = set(
             p for p in self.rp_candidates if not (
-                set([p.id, p.root_id]) & rp_ids))
+                set([p.uuid, p.root_uuid]) & rp_uuids))
 
     @property
     def rps(self):
-        """Returns a set of IDs of nominated resource providers"""
-        return set(p.id for p in self.rp_candidates)
+        """Returns a set of UUIDs of nominated resource providers"""
+        return set(p.uuid for p in self.rp_candidates)
 
     @property
     def trees(self):
         """Returns a set of nominated trees each of which are expressed by
-        the root provider ID
+        the root provider UUID
         """
-        return set(p.root_id for p in self.rp_candidates)
+        return set(p.root_uuid for p in self.rp_candidates)
 
     @property
     def all_rps(self):
