@@ -95,18 +95,14 @@ def create_resource_provider(req):
     if data.get('uuid'):
         # Normalize UUID with no proper dashes into dashed one
         # with format {8}-{4}-{4}-{4}-{12}
-        data['uuid'] = "'%s'" % uuidlib.UUID(data['uuid'])
+        data['uuid'] = str(uuidlib.UUID(data['uuid']))
     else:
-        data['uuid'] = "'%s'" % uuidutils.generate_uuid()
+        data['uuid'] = uuidutils.generate_uuid()
     data["generation"] = 0
 
-    data_args = ", ".join(["%s: %s" % (k, v) for k, v in data.items()])
-    query = """
-CREATE (rp:RESOURCE_PROVIDER {%s})
-RETURN rp
-""" % data_args
     try:
-        result = db.execute(query)
+        resource_provider = rp_obj.ResourceProvider(context, **data)
+        resource_provider.create()
     except db.ClientError as e:
         if "ConstraintValidationFailed" in str(e):
             if "property `uuid`" in str(e):
@@ -116,7 +112,10 @@ RETURN rp
             raise webob.exc.HTTPConflict("Conflicting resource provider "
                     "%(duplicate)s already exists." % {'duplicate': duplicate},
                     comment=errors.DUPLICATE_NAME)
-    resource_provider = db.pythonize(result[0]["rp"])
+        else:
+            raise webob.exc.HTTPBadRequest("Unable to create resource "
+                    "provider '%(rp_uuid)s': %(error)s" %
+                    {"rp_uuid": data.get("uuid"), "error": e})
 
     req.response.location = util.resource_provider_url(
         req.environ, resource_provider)
@@ -306,3 +305,27 @@ def update_resource_provider(req):
         response.last_modified = resource_provider.updated_at
         response.cache_control = 'no-cache'
     return response
+
+
+@wsgi_wrapper.PlacementWsgify
+def associate(req):
+    """Associate a resource provider with one or more other resource providers.
+    This is commonly used to create a sharing relationship among resource
+    providers.
+
+    On success return a 204 and an empty body.
+    """
+    uuid = util.wsgi_path_item(req.environ, "uuid")
+    context = req.environ["placement.context"]
+    context.can(policies.UPDATE)
+    schema = rp_schema.POST_RPS_ASSOCIATE
+    want_version = req.environ[microversion.MICROVERSION_ENVIRON]
+    data = util.extract_json(req.body, schema)
+    target_uuids = data["targets"]
+
+    # The containing application will catch a not found here.
+    resource_provider = rp_obj.ResourceProvider.get_by_uuid(context, uuid)
+    rp_obj.associate(context, resource_provider, target_uuids)
+
+    response = req.response
+    response.status = 204

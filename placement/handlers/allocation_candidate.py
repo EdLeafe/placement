@@ -13,6 +13,7 @@
 """Placement API handlers for getting allocation candidates."""
 
 import collections
+import itertools
 
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
@@ -26,6 +27,7 @@ from placement import microversion
 from placement.objects import allocation_candidate as ac_obj
 from placement.policies import allocation_candidate as policies
 from placement.schemas import allocation_candidate as schema
+from placement.objects import resource_provider as rp_obj
 from placement import util
 from placement import wsgi_wrapper
 
@@ -208,23 +210,20 @@ def _exclude_nested_providers(alloc_cands):
     """Exclude allocation requests and provider summaries for old microversions
     if they involve more than one provider from the same tree.
     """
-    # Build a temporary dict, keyed by root RP UUID of sets of UUIDs of all RPs
-    # in that tree.
-    tree_rps_by_root = collections.defaultdict(set)
-    for ps in alloc_cands.provider_summaries:
-        rp_uuid = ps.resource_provider.uuid
-        root_uuid = ps.resource_provider.root_provider_uuid
-        tree_rps_by_root[root_uuid].add(rp_uuid)
-    # We use this to get a list of sets of providers in each tree
-    tree_sets = list(tree_rps_by_root.values())
-
-    for a_req in alloc_cands.allocation_requests[:]:
-        alloc_rp_uuids = set([
-            arr.resource_provider.uuid for arr in a_req.resource_requests])
-        # If more than one allocation is provided by the same tree, kill
-        # that allocation request.
-        if any(len(tree_set & alloc_rp_uuids) > 1 for tree_set in tree_sets):
-            alloc_cands.allocation_requests.remove(a_req)
+    # Get all the providers for each of the allocation candidates. If there is
+    # more than one provider for any a/c, check if they are in a nested
+    # relationship, and not a shared relationship. If nested, remove that
+    # candidate.
+    to_remove = []
+    for alloc_req in alloc_cands.allocation_requests:
+        p_uuids = set([rr.resource_provider.uuid
+                for rr in alloc_req.resource_requests])
+        if len(p_uuids) > 1:
+            if any([rp_obj.is_nested(*combo)
+                    for combo in itertools.combinations(p_uuids, 2)]):
+                to_remove.append(alloc_req)
+    for allloc_req in to_remove:
+        alloc_cand.resource_requests.remove(res_req)
 
     # Exclude eliminated providers from the provider summaries.
     all_rp_uuids = set()
@@ -234,7 +233,6 @@ def _exclude_nested_providers(alloc_cands):
     for ps in alloc_cands.provider_summaries[:]:
         if ps.resource_provider.uuid not in all_rp_uuids:
             alloc_cands.provider_summaries.remove(ps)
-
     return alloc_cands
 
 

@@ -99,6 +99,9 @@ ROUTE_DECLARATIONS = {
     '/resource_providers/{uuid}/allocations': {
         'GET': allocation.list_for_resource_provider,
     },
+    '/resource_providers/{uuid}/associate': {
+        'POST': resource_provider.associate,
+    },
     '/allocations': {
         'POST': allocation.set_allocations,
     },

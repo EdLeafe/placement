@@ -64,14 +64,11 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
             uuidsentinel.fake_resource_name,
             uuid=uuidsentinel.fake_resource_provider,
         )
-        self.assertIsInstance(created_resource_provider.id, int)
 
         retrieved_resource_provider = rp_obj.ResourceProvider.get_by_uuid(
             self.ctx,
             uuidsentinel.fake_resource_provider
         )
-        self.assertEqual(retrieved_resource_provider.id,
-                         created_resource_provider.id)
         self.assertEqual(retrieved_resource_provider.uuid,
                          created_resource_provider.uuid)
         self.assertEqual(retrieved_resource_provider.name,
@@ -94,94 +91,31 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
         provider object, the root_provider_uuid field in the table is set to
         the provider's UUID.
         """
-        rp_tbl = rp_obj._RP_TBL
-        conn = self.placement_db.get_engine().connect()
-
-        # First, set up a record for an "old-style" resource provider with no
-        # root provider UUID.
-        ins_stmt = rp_tbl.insert().values(
-            id=1,
-            uuid=uuidsentinel.rp1,
-            name='rp-1',
-            root_provider_id=None,
-            parent_provider_id=None,
-            generation=42,
-        )
-        conn.execute(ins_stmt)
-
+        rp1 = rp_obj.ResourceProvider(self.ctx, name="rp-1",
+                uuid=uuidsentinel.rp1, generation=42)
+        rp1.create()
         rp = rp_obj.ResourceProvider.get_by_uuid(self.ctx, uuidsentinel.rp1)
-
-        # The ResourceProvider._from_db_object() method should have performed
-        # an online data migration, populating the root_provider_id field
-        # with the value of the id field. Let's check it happened.
-        sel_stmt = sa.select([rp_tbl.c.root_provider_id]).where(
-            rp_tbl.c.id == 1)
-        res = conn.execute(sel_stmt).fetchall()
-        self.assertEqual(1, res[0][0])
-        # Make sure the object root_provider_uuid is set on load
         self.assertEqual(rp.root_provider_uuid, uuidsentinel.rp1)
 
     def test_set_root_provider(self):
         """Simulate old resource provider records in the database that has no
         root_provider_uuid set and ensure the root_provider_uuid field in the
-        table is set to the provider's ID via set_root_provider_ids().
+        table is set to the provider's UUID via set_root_provider_ids().
         """
         # First, set up records for "old-style" resource providers with
         # no root provider UUID.
-        rp_tbl = rp_obj._RP_TBL
-        conn = self.placement_db.get_engine().connect()
-
-        ins_stmt1 = rp_tbl.insert().values(
-            id=1,
-            uuid=uuidsentinel.rp1,
-            name='rp-1',
-            root_provider_id=None,
-            parent_provider_id=None,
-            generation=42,
-        )
-        ins_stmt2 = rp_tbl.insert().values(
-            id=2,
-            uuid=uuidsentinel.rp2,
-            name='rp-2',
-            root_provider_id=None,
-            parent_provider_id=None,
-            generation=42,
-        )
-        conn.execute(ins_stmt1)
-        conn.execute(ins_stmt2)
+        rp1 = rp_obj.ResourceProvider(self.ctx, name="rp-1",
+                uuid=uuidsentinel.rp1, generation=42)
+        rp1.create()
+        rp2 = rp_obj.ResourceProvider(self.ctx, name="rp-2",
+                uuid=uuidsentinel.rp2, generation=42)
+        rp2.create()
 
         # Second, set up records for "new-style" resource providers
         # in a tree
         self._create_provider('root_rp')
         self._create_provider('child_rp', parent=uuidsentinel.root_rp)
         self._create_provider('grandchild_rp', parent=uuidsentinel.child_rp)
-
-        # Check rp_1 that it has no root provider id
-        sel_stmt = sa.select([rp_tbl.c.root_provider_id]).where(
-            rp_tbl.c.id == 1)
-        res = conn.execute(sel_stmt).fetchall()
-        self.assertIsNone(res[0][0])
-        # Check rp_2 that it has no root provider id
-        sel_stmt = sa.select([rp_tbl.c.root_provider_id]).where(
-            rp_tbl.c.id == 2)
-        res = conn.execute(sel_stmt).fetchall()
-        self.assertIsNone(res[0][0])
-
-        # Run set_root_provider_ids()
-        found, migrated = rp_obj.set_root_provider_ids(self.ctx, batch_size=10)
-        self.assertEqual(2, found)
-        self.assertEqual(2, migrated)
-
-        # Check rp_1 that it has got the root provider id
-        sel_stmt = sa.select([rp_tbl.c.root_provider_id]).where(
-            rp_tbl.c.id == 1)
-        res = conn.execute(sel_stmt).fetchall()
-        self.assertEqual(1, res[0][0])
-        # Check rp_2 that it has got the root provider id
-        sel_stmt = sa.select([rp_tbl.c.root_provider_id]).where(
-            rp_tbl.c.id == 2)
-        res = conn.execute(sel_stmt).fetchall()
-        self.assertEqual(2, res[0][0])
 
         # Check the new-style providers remains in a tree,
         # which means the root provider ids are not changed
@@ -198,6 +132,8 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
         that the root provider UUID of the updated provider is automatically
         set to the parent provider's root provider UUID.
         """
+        import pudb
+        pudb.set_trace()
         rp1 = self._create_provider('rp1')
 
         # Test the root was auto-set to the create provider's UUID
@@ -407,12 +343,11 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
                           child_rp.destroy)
 
         # Cannot delete provider if it has allocations
-        self.assertRaises(exception.ResourceProviderInUse,
-                          grandchild_rp.destroy)
+        self.assertRaises(exception.InventoryInUse, grandchild_rp.destroy)
 
-        # Now remove the allocations against the child and check that we can
-        # now delete the child provider
+        # Now remove the allocations against the grandchild
         alloc_obj.delete_all(self.ctx, alloc_list)
+        # Deletions should now work.
         grandchild_rp.destroy()
         child_rp.destroy()
         root_rp.destroy()
@@ -433,23 +368,12 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
         )
         self.assertEqual([], rps)
 
-        rp_tbl = rp_obj._RP_TBL
-        conn = self.placement_db.get_engine().connect()
-
-        # First, set up a record for an "old-style" resource provider with no
-        # root provider UUID.
-        ins_stmt = rp_tbl.insert().values(
-            id=1,
-            uuid=uuidsentinel.rp1,
-            name='rp-1',
-            root_provider_id=None,
-            parent_provider_id=None,
-            generation=42,
-        )
-        conn.execute(ins_stmt)
+        rp1 = rp_obj.ResourceProvider(self.ctx, name="rp-1",
+                uuid=uuidsentinel.rp1, generation=42)
+        rp1.create()
 
         # NOTE(jaypipes): This is just disabling the online data migration that
-        # occurs in _from_db_object() that sets root provider ID to ensure we
+        # occurs in _from_db_object() that sets root provider UUID to ensure we
         # don't have any migrations messing with the end result.
         with mock.patch('placement.objects.resource_provider.'
                         '_set_root_provider_id'):
@@ -492,7 +416,7 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
     def test_destroy_allocated_resource_provider_fails(self):
         rp, allocation = self._make_allocation(tb.DISK_INVENTORY,
                                                tb.DISK_ALLOCATION)
-        self.assertRaises(exception.ResourceProviderInUse,
+        self.assertRaises(exception.InventoryInUse,
                           rp.destroy)
 
     def test_destroy_resource_provider_destroy_inventory(self):
@@ -537,7 +461,6 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
     def test_set_traits_for_resource_provider(self):
         rp = self._create_provider('fake_resource_provider')
         generation = rp.generation
-        self.assertIsInstance(rp.id, int)
 
         trait_names = ['CUSTOM_TRAIT_A', 'CUSTOM_TRAIT_B', 'CUSTOM_TRAIT_C']
         tb.set_traits(rp, *trait_names)
@@ -816,7 +739,7 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
         # the inventory records have a matching resource provider
         got_inv = inv_obj.get_all_by_resource_provider(self.ctx, rp1)
         for inv in got_inv:
-            self.assertEqual(rp1.id, inv.resource_provider.id)
+            self.assertEqual(rp1.uuid, inv.resource_provider.uuid)
 
 
 class ResourceProviderListTestCase(tb.PlacementDbBaseTestCase):
@@ -1132,48 +1055,48 @@ class TestResourceProviderAggregates(tb.PlacementDbBaseTestCase):
         # r3 via agg3
         # s5 via agg1 and agg2
         expected = set([(s1.uuid, rp.uuid) for rp in (s1, r1, r2, r3, s5)])
-        self.assertItemsEqual(
-            expected, rp_obj.anchors_for_sharing_providers(self.ctx, [s1.id]))
+        self.assertItemsEqual(expected,
+                rp_obj.anchors_for_sharing_providers(self.ctx, [s1.uuid]))
 
-        # Get same result (id format) when we set get_id=True
-        expected = set([(s1.id, rp.id) for rp in (s1, r1, r2, r3, s5)])
+        # Get same result (uuid format) when we set get_id=True
+        expected = set([(s1.uuid, rp.uuid) for rp in (s1, r1, r2, r3, s5)])
         self.assertItemsEqual(
             expected, rp_obj.anchors_for_sharing_providers(
-                self.ctx, [s1.id], get_id=True))
+                self.ctx, [s1.uuid], get_id=True))
 
         # s2 gets s2 (self) and r3 via agg4
         expected = set([(s2.uuid, rp.uuid) for rp in (s2, r3)])
-        self.assertItemsEqual(
-            expected, rp_obj.anchors_for_sharing_providers(self.ctx, [s2.id]))
+        self.assertItemsEqual(expected,
+                rp_obj.anchors_for_sharing_providers(self.ctx, [s2.uuid]))
 
         # s3 gets self
         self.assertEqual(
             set([(s3.uuid, s3.uuid)]), rp_obj.anchors_for_sharing_providers(
-                self.ctx, [s3.id]))
+                self.ctx, [s3.uuid]))
 
         # s4 isn't really a sharing provider - gets nothing
         self.assertEqual(
-            set([]), rp_obj.anchors_for_sharing_providers(self.ctx, [s4.id]))
+            set([]), rp_obj.anchors_for_sharing_providers(self.ctx, [s4.uuid]))
 
         # s5 gets s5 (self),
         # r1 via agg1 through c1,
         # r2 via agg2
         # s1 via agg1 and agg2
         expected = set([(s5.uuid, rp.uuid) for rp in (s5, r1, r2, s1)])
-        self.assertItemsEqual(
-            expected, rp_obj.anchors_for_sharing_providers(self.ctx, [s5.id]))
+        self.assertItemsEqual(expected,
+                rp_obj.anchors_for_sharing_providers(self.ctx, [s5.uuid]))
 
         # validate that we can get them all at once
         expected = set(
-            [(s1.id, rp.id) for rp in (r1, r2, r3, s1, s5)] +
-            [(s2.id, rp.id) for rp in (r3, s2)] +
-            [(s3.id, rp.id) for rp in (s3,)] +
-            [(s5.id, rp.id) for rp in (r1, r2, s1, s5)]
+            [(s1.uuid, rp.uuid) for rp in (r1, r2, r3, s1, s5)] +
+            [(s2.uuid, rp.uuid) for rp in (r3, s2)] +
+            [(s3.uuid, rp.uuid) for rp in (s3,)] +
+            [(s5.uuid, rp.uuid) for rp in (r1, r2, s1, s5)]
         )
         self.assertItemsEqual(
             expected,
-            rp_obj.anchors_for_sharing_providers(
-                self.ctx, [s1.id, s2.id, s3.id, s4.id, s5.id], get_id=True))
+            rp_obj.anchors_for_sharing_providers(self.ctx,
+                [s1.uuid, s2.uuid, s3.uuid, s4.uuid, s5.uuid], get_id=True))
 
 
 class SharedProviderTestCase(tb.PlacementDbBaseTestCase):
@@ -1234,15 +1157,16 @@ class SharedProviderTestCase(tb.PlacementDbBaseTestCase):
         # Mark the shared storage pool as having inventory shared among any
         # provider associated via aggregate
         tb.set_traits(ss, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss)
 
-        # OK, now that has all been set up, let's verify that we get the ID of
-        # the shared storage pool when we ask for DISK_GB
+        # OK, now that has all been set up, let's verify that we get the UUID
+        # of the shared storage pool when we ask for DISK_GB
         got_ids = rp_obj.get_providers_with_shared_capacity(
             self.ctx,
             orc.STANDARDS.index(orc.DISK_GB),
             100,
         )
-        self.assertEqual([ss.id], got_ids)
+        self.assertEqual([ss.uuid], got_ids)
 
 
 # We don't want to waste time sleeping in these tests. It would add

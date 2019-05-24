@@ -38,18 +38,19 @@ def _get_all_by_resource_provider_uuid(context, rp_uuid):
             MATCH (rp {uuid: '%s'})-[*0..99]->(:RESOURCE_PROVIDER)-
                 [:PROVIDES]->(rc)
             WITH rc
-            MATCH p=(cs:CONSUMER)-[:USES]->(rc)
+            OPTIONAL MATCH p=(cs:CONSUMER)-[:USES]->(rc)
             WITH labels(rc)[0] AS rcname, relationships(p)[0] AS usage
             RETURN rcname, sum(usage.amount) AS used
     """ % rp_uuid
     result = db.execute(query)
-    return {rec["rcname"]: rec["used"] for rec in result}
+    return [{"resource_class": rec["rcname"], "usage": rec["used"]}
+            for rec in result]
 
 
 @db_api.placement_context_manager.reader
 def _get_all_by_project_user(context, project_id, user_id=None):
     if user_id:
-        match = "MATCH p=(:USER {uuid: '%s'})-[:USES]->(rc)" % user_id
+        match = "MATCH p=(:USER {uuid: '%s'})-[*]->()-[:USES]->(rc)" % user_id
     else:
         match = "MATCH p=(:PROJECT {uuid: '%s'})-[*]->()-[:USES]->(rc)"
         match = match % project_id

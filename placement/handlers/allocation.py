@@ -98,8 +98,8 @@ def _serialize_allocations_for_consumer(allocations, want_version):
         # We're looking at a list of allocations by consumer id so project and
         # user are consistent across the list
         consumer = allocations[0].consumer
-        project_id = consumer.project.external_id
-        user_id = consumer.user.external_id
+        project_id = consumer.project.uuid
+        user_id = consumer.user.uuid
         result['project_id'] = project_id
         result['user_id'] = user_id
         show_consumer_gen = want_version.matches((1, 28))
@@ -219,12 +219,12 @@ def inspect_consumers(context, data, want_version):
     consumers = {}  # dict of Consumer objects, keyed by consumer UUID
     new_consumers_created = []
     for consumer_uuid in data:
-        project_id = data[consumer_uuid]['project_id']
-        user_id = data[consumer_uuid]['user_id']
+        project_uuid = data[consumer_uuid]['project_id']
+        user_uuid = data[consumer_uuid]['user_id']
         consumer_generation = data[consumer_uuid].get('consumer_generation')
         try:
             consumer, new_consumer_created = data_util.ensure_consumer(
-                context, consumer_uuid, project_id, user_id,
+                context, consumer_uuid, project_uuid, user_uuid,
                 consumer_generation, want_version)
             if new_consumer_created:
                 new_consumers_created.append(consumer)

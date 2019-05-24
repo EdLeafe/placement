@@ -104,3 +104,20 @@ GET_RPS_SCHEMA_1_18 = copy.deepcopy(GET_RPS_SCHEMA_1_14)
 GET_RPS_SCHEMA_1_18['properties']['required'] = {
     "type": "string",
 }
+
+# Creating association relationships among resource providers, used to denote
+# sharing of resources.
+POST_RPS_ASSOCIATE = {
+    "type": "object",
+    "properties": {
+        "targets": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+            }
+        }
+    }
+}

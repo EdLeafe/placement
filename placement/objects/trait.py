@@ -34,10 +34,8 @@ class Trait(object):
     # All the user-defined traits must begin with this prefix.
     CUSTOM_NAMESPACE = 'CUSTOM_'
 
-    def __init__(self, context, id=None, name=None, updated_at=None,
-                 created_at=None):
+    def __init__(self, context, name=None, updated_at=None, created_at=None):
         self._context = context
-        self.id = id
         self.name = name
         self.updated_at = updated_at
         self.created_at = created_at
@@ -46,9 +44,9 @@ class Trait(object):
     @staticmethod
     def _from_db_object(context, target, source):
         target._context = context
-        target.name = source['name']
-        target.updated_at = source['updated_at']
-        target.created_at = source['created_at']
+        target.name = source["name"]
+        target.updated_at = source.get("updated_at")
+        target.created_at = source.get("created_at")
         return target
 
     @staticmethod
@@ -57,19 +55,23 @@ class Trait(object):
         upd_list = []
         for key, val in updates.items():
             if isinstance(val, six.string_types):
-                upd_list.append("%s = '%s'" % (key, val))
+                upd_list.append("%s: '%s'" % (key, val))
             else:
-                upd_list.append("%s = %s" % (key, val))
+                upd_list.append("%s: %s" % (key, val))
+        if "created_at" not in updates:
+            upd_list.append("created_at: timestamp()")
+        if "updated_at" not in updates:
+            upd_list.append("updated_at: timestamp()")
         upd_clause = ", ".join(upd_list)
         query = """
-        CREATE (t:TRAIT {%s})
-        RETURN t
+        CREATE (trait:TRAIT {%s})
+        RETURN trait
         """ % upd_clause
         try:
             result = db.execute(query)
         except db.ClientError as e:
             raise db_exc.DBDuplicateEntry(e)
-        return db.pythonize(result[0])
+        return db.pythonize(result[0]["trait"])
 
     def create(self):
         if not self.name:
@@ -94,18 +96,19 @@ class Trait(object):
     @db_api.placement_context_manager.reader
     def _get_by_name_from_db(context, name):
         query = """
-                MATCH (t:TRAIT {name: '%s'})
-                RETURN t
-        """
+                MATCH (trait:TRAIT {name: '%s'})
+                RETURN trait
+        """ % name
         result = db.execute(query)
         if not result:
             raise exception.TraitNotFound(names=name)
-        return db.pythonize(result[0])
+        trait = db.pythonize(result[0]["trait"])
+        return trait
 
     @classmethod
     def get_by_name(cls, context, name):
         db_trait = cls._get_by_name_from_db(context, six.text_type(name))
-        return cls._from_db_object(context, cls(context), db_trait)
+        return cls(context, **db_trait)
 
     @classmethod
     def get_all_names(cls, context):
@@ -191,15 +194,23 @@ def get_traits_by_provider_uuid(context, rp_uuid):
             RETURN properties(rp) as props
     """ % rp_uuid
     result = db.execute(query)
-    props = [rec["props"] for rec in result]
+    prop_dict = result[0]["props"] if result else {}
+    props = list(prop_dict.keys())
     if not props:
         return []
-    return _traits_from_props(props)
+    return _traits_from_props(context, props)
 
 
-def _traits_from_props(props):
-    all_traits = Trait.get_all_names()
-    return [prop for p in props if p in all_traits]
+def _traits_from_props(context, props):
+    all_traits = Trait.get_all_names(context)
+    trait_names = [prop for prop in props if prop in all_traits]
+    query = """
+            MATCH (trait:TRAIT)
+            WHERE trait.name IN %s
+            RETURN trait
+    """ % trait_names
+    result = db.execute(query)
+    return [db.pythonize(rec["trait"]) for rec in result]
 
 
 @db_api.placement_context_manager.reader
@@ -222,21 +233,25 @@ def get_traits_by_provider_tree(ctx, root_uuids):
             OPTIONAL MATCH (root)-[*]->(rp:RESOURCE_PROVIDER)
             RETURN root, rp
     """
-    rp_traits = collections.defaultdict(set)
+    all_traits = collections.defaultdict(set)
     for root_uuid in root_uuids:
         result = db.execute(query % root_uuid)
         if result:
             root_rp = db.pythonize(result[0]["root"])
             root_props = root_rp.keys()
-            root_traits = _traits_from_props(root_props)
-            rp_traits[root_uuid].update(root_traits)
+            root_traits = _traits_from_props(ctx, root_props)
+            all_traits[root_uuid].update(root_traits)
         for rec in result:
-            rp = rp_traits[rec["rp"]]
-            rp_traits = _traits_from_props(rp_props)
-            rp_traits[rp_uuid].update(rp_traits)
+            rp_node = rec["rp"]
+            if not rp_node:
+                continue
+            rp = db.pythonize(rp_node)
+            rp_props = rp.keys()
+            rp_traits = _traits_from_props(ctx, rp_props)
+            all_traits[rp.uuid].update(rp_traits)
     # Convert the sets back to lists
-    rp_traits = {k: list(v) for k, v in rp_traits.items()}
-    return rp_traits
+    all_traits = {k: list(v) for k, v in all_traits.items()}
+    return all_traits
 
 
 @db_api.placement_context_manager.reader
@@ -253,10 +268,10 @@ def _get_all_from_db(context, filters):
     name_where = ""
     assoc = ""
     if 'name_in' in filters:
-        name_list = ["'%s'" % six.text_type(n) for n in filters['name_in']]
-        name_where = "WHERE t.name IN [%s]" % name_list
+        name_list = [six.text_type(n) for n in filters['name_in']]
+        name_where = "WHERE trait.name IN %s" % name_list
     if 'prefix' in filters:
-        prefix_where = "t.name STARTS WITH %s" % prefix
+        prefix_where = "trait.name STARTS WITH %s" % prefix
         if name_where:
             name_where += "AND %s" % prefix_where
         else:
@@ -264,19 +279,19 @@ def _get_all_from_db(context, filters):
     if 'associated' in filters:
         # This will be either True or False
         assoc = """
-                WITH t
+                WITH trait
                 MATCH (rp)
                 WHERE %s exists(rp.%s)
         """
         add_not = "" if filters["associated"] else "not"
     query = """
-            MATCH (t:TRAIT)
+            MATCH (trait:TRAIT)
             %(name_where)s
             %(assoc)s
-            RETURN t
+            RETURN trait
     """ % {"name_where": name_where, "assoc": assoc}
     result = db.execute(query)
-    return [db.pythonize(rec) for rec in result]
+    return [db.pythonize(rec["trait"]) for rec in result]
 
 
 @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
@@ -298,7 +313,7 @@ def _trait_sync(ctx):
     # Get the traits in the database
     trait_names = Trait.get_all_names(ctx)
     db_traits = set(name for name in trait_names
-            if not os.traits.is_custom(name))
+            if not os_traits.is_custom(name))
     # Determine those traits which are in os_traits but not
     # currently in the database, and insert them.
     need_sync = std_traits - db_traits

@@ -1,8 +1,10 @@
+import copy
 from datetime import datetime
 import os
+import six
 import uuid
 
-from py2neo import ClientError, Graph, Node
+from py2neo import ClientError, Graph, Node, TransientError
 
 HOST = "notebook.leafe.com"
 PASSWORD = "placement"
@@ -33,23 +35,31 @@ class DotDict(dict):
     __delattr__ = dict.__delitem__
 
 
-def pythonize(gdict):
-    """Takes a dict returned from the graph and converts as needed to a python
-    object.
+def pythonize(gr_node):
+    """Takes a node returned from the graph and returns a python object with
+    values converted to Python values.
     """
-    def to_python_dt(text):
-        if text:
-            return datetime.strptime(text, "%Y-%m-%d %H:%M:%S %Z")
-        return text
+    def to_python_dt(val):
+        if not val:
+            return val
+        if isinstance(val, six.string_types):
+            return datetime.strptime(val, "%Y-%m-%d %H:%M:%S %Z")
+        else:
+            # Neo4j timestamp in milliseconds
+            seconds = val / 1000
+            return datetime.fromtimestamp(seconds)
+        return val
 
+    # 'gr_node' is a Neo4j Node object; extract the dict values from it.
+    ret = dict(gr_node.items())
     # Convert datetime fields
-    val = gdict.get("created_at")
+    val = ret.get("created_at")
     if val:
-        gdict["created_at"] = to_python_dt(val)
-    val = gdict.get("updated_at")
+        ret["created_at"] = to_python_dt(val)
+    val = ret.get("updated_at")
     if val:
-        gdict["updated_at"] = to_python_dt(val)
-    return DotDict(gdict)
+        ret["updated_at"] = to_python_dt(val)
+    return DotDict(ret)
 
 
 def connect():
@@ -89,13 +99,13 @@ def execute(query, tx=None, autocommit=True):
 
 def delete_all():
     g = connect()
-    tx = begin_transaction(g=g)
+    tx = begin_transaction(g=g, autocommit=False)
     g.delete_all()
     tx.commit()
 
 
 def gen_uuid():
-    return f"{uuid.uuid4()}"
+    return str(uuid.uuid4())
 
 
 def create_node(tx, typ, name_base, num=None, **kwargs):
@@ -105,9 +115,9 @@ def create_node(tx, typ, name_base, num=None, **kwargs):
     if num is None:
         nm = name_base
     else:
-        num = f"{num}".zfill(4)
-        nm = f"{name_base}{num}"
-    u = f"{uuid.uuid4()}"
+        num = str(num).zfill(4)
+        nm = "%s%s" % (name_base, num)
+    u = str(uuid.uuid4())
     new_node = Node(typ, name=nm, uuid=u, **kwargs)
     tx.create(new_node)
     return new_node
@@ -116,3 +126,18 @@ def create_node(tx, typ, name_base, num=None, **kwargs):
 def trait_args(traits):
     traits = traits if traits else []
     return {t: True for t in traits}
+
+
+def get_root_node(node_uuid, relationship=":CONTAINS"):
+    """Given the UUID of a node, returns the UUID of the "furthest" node from
+    it in the specified relationship.
+    """
+    query = """
+            MATCH p=(root)-[%s*0..99]->(nd {uuid: '%s'})
+            WITH root, p, size(relationships(p)) AS relsize
+            ORDER BY relsize DESC
+            RETURN root.uuid AS root_uuid
+    """ % (relationship, node_uuid)
+    result = execute(query)
+    if result:
+        return result[0]["root_uuid"]

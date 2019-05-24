@@ -228,6 +228,13 @@ tests:
   data:
       - 7fade9e1-ab01-4d1b-84db-ac74f740bb42
 
+- name: associate rp with shared
+  POST: /resource_providers/8aa83304-4b6d-4a23-b954-06d8b36b206a/associate
+  data:
+      targets:
+        - $ENVIRON["RP_UUID"]
+  status: 204
+
 - name: get candidates with shared
   GET: /allocation_candidates?resources=VCPU:1,DISK_GB:200&required=STORAGE_DISK_SSD
   response_json_paths:

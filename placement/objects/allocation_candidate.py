@@ -101,6 +101,7 @@ class AllocationCandidates(object):
         """
         member_of = request.member_of
         forbidden_aggs = request.forbidden_aggs
+        resources = request.resources
 
         tree_root_uuid = None
         if request.in_tree:
@@ -121,7 +122,7 @@ class AllocationCandidates(object):
             # each resource class requested.
             # If there aren't any providers that have any of the
             # required traits, just exit early...
-            if required_trait_map:
+            if request.required_traits:
                 # TODO(cdent): Now that there is also a forbidden_trait_map
                 # it should be possible to further optimize this attempt at
                 # a quick return, but we leave that to future patches for
@@ -143,7 +144,7 @@ class AllocationCandidates(object):
         # tuples of (provider UUID, root provider UUID) that have ALL
         # the requested resources and more efficiently construct the
         # allocation requests.
-        rp_tuples = rp_obj.get_provider_ids_matching(context, resources,
+        rp_tuples = rp_obj.get_provider_uuids_matching(context, resources,
                 request.required_traits, request.forbidden_traits, member_of,
                 forbidden_aggs, tree_root_uuid)
         return _alloc_candidates_single_provider(context, resources, rp_tuples)
@@ -163,10 +164,10 @@ class AllocationCandidates(object):
         for request in requests.values():
             member_of = request.member_of
             for rc_name, amount in request.resources.items():
-                rc_id = rc_cache.RC_CACHE.id_from_string(rc_name)
-                if rc_id not in sharing:
-                    sharing[rc_id] = rp_obj.get_providers_with_shared_capacity(
-                        context, rc_id, amount, member_of)
+                if rc_name in sharing:
+                    continue
+                sharing[rc_name] = rp_obj.get_providers_with_shared_capacity(
+                        context, rc_name, amount, member_of)
         has_trees = rp_obj.has_provider_trees(context)
 
         candidates = {}
@@ -273,12 +274,12 @@ class AllocationRequestResource(object):
         self.amount = amount
 
     def __eq__(self, other):
-        return ((self.resource_provider.id == other.resource_provider.id) and
-                (self.resource_class == other.resource_class) and
-                (self.amount == other.amount))
+        return ((self.resource_provider.uuid == other.resource_provider.uuid)
+                and (self.resource_class == other.resource_class)
+                and (self.amount == other.amount))
 
     def __hash__(self):
-        return hash((self.resource_provider.id,
+        return hash((self.resource_provider.uuid,
                      self.resource_class,
                      self.amount))
 
@@ -307,7 +308,7 @@ def _alloc_candidates_multiple_providers(ctx, requested_resources,
         required_traits, forbidden_traits, rp_candidates):
     """Returns a tuple of (allocation requests, provider summaries) for a
     supplied set of requested resource amounts and tuples of
-    (rp_id, root_uuid, rc_id). The supplied resource provider trees have
+    (rp_uuid, root_uuid, rc_name). The supplied resource provider trees have
     capacity to satisfy ALL of the resources in the requested resources as
     well as ALL required traits that were requested by the user.
 
@@ -317,15 +318,13 @@ def _alloc_candidates_multiple_providers(ctx, requested_resources,
     satisfy different resources involved in a single request group.
 
     :param ctx: placement.context.RequestContext object
-    :param requested_resources: dict, keyed by resource class ID, of amounts
+    :param requested_resources: dict, keyed by resource class UUID, of amounts
                                 being requested for that resource class
-    :param required_traits: A map, keyed by trait string name, of required
-                            trait internal IDs that each *allocation request's
-                            set of providers* must *collectively* have
-                            associated with them
-    :param forbidden_traits: A map, keyed by trait string name, of trait
-                             internal IDs that a resource provider must
-                             not have.
+    :param required_traits: A list of trait string names that each *allocation
+                            request's set of providers* must *collectively*
+                            have associated with them
+    :param forbidden_traits: A list of trait string names that a resource
+                             provider must not have.
     :param rp_candidates: RPCandidates object representing the providers
                           that satisfy the request for resources.
     """
@@ -348,17 +347,17 @@ def _alloc_candidates_multiple_providers(ctx, requested_resources,
     # objects for all providers
     summaries = _build_provider_summaries(ctx, usages, prov_traits)
 
-    # Get a dict, keyed by root provider internal ID, of a dict, keyed by
-    # resource class internal ID, of lists of AllocationRequestResource objects
+    # Get a dict, keyed by root provider UUID, of a dict, keyed by
+    # resource class UUID, of lists of AllocationRequestResource objects
     tree_dict = collections.defaultdict(lambda: collections.defaultdict(list))
 
     for rp in rp_candidates.rps_info:
-        rp_summary = summaries[rp.id]
-        tree_dict[rp.root_uuid][rp.rc_id].append(
+        rp_summary = summaries[rp.uuid]
+        tree_dict[rp.root_uuid][rp.rc_name].append(
             AllocationRequestResource(
                 resource_provider=rp_summary.resource_provider,
-                resource_class=rc_cache.RC_CACHE.string_from_id(rp.rc_id),
-                amount=requested_resources[rp.rc_id]))
+                resource_class=rp.rc_name,
+                amount=requested_resources[rp.rc_name]))
 
     # Next, build up a set of allocation requests. These allocation requests
     # are AllocationRequest objects, containing resource provider UUIDs,
@@ -377,11 +376,10 @@ def _alloc_candidates_multiple_providers(ctx, requested_resources,
         # [[ARR(rc1, rp1), ARR(rc1, rp2)],
         #  [ARR(rc2, rp1), ARR(rc2, rp2)],
         #  [ARR(rc3, rp1)]]
-        # , which should be ordered by the resource class id.
+        # , which should be ordered by the resource class uuid.
         request_groups = [val for key, val in sorted(alloc_dict.items())]
 
         root_summary = summaries[root_uuid]
-        root_uuid = root_summary.resource_provider.uuid
         root_alloc_reqs = set()
 
         # Using itertools.product, we get all the combinations of resource
@@ -505,19 +503,19 @@ def _build_provider_summaries(context, usages, prov_traits):
     # Before we go creating provider summary objects, first grab all the
     # provider information (including root, parent and UUID information) for
     # all providers involved in our operation
-    rp_uuids = set(usage["resource_provider_uuid"] for usage in usages)
+    rp_uuids = list(set(usage["resource_provider_uuid"] for usage in usages))
     provider_dict = rp_obj.provider_uuids_from_rp_uuids(context, rp_uuids)
     provider_uuids = list(provider_dict.keys())
 
-    # Build up a dict, keyed by internal resource provider ID, of
-    # ProviderSummary objects containing one or more ProviderSummaryResource
-    # objects representing the resources the provider has inventory for.
+    # Build up a dict, keyed by resource provider UUID, of ProviderSummary
+    # objects containing one or more ProviderSummaryResource objects
+    # representing the resources the provider has inventory for.
     summaries = {}
     for usage in usages:
         rp_uuid = usage["resource_provider_uuid"]
         summary = summaries.get(rp_uuid)
         if not summary:
-            puuids = provider_uuids[rp_uuid]
+            puuids = provider_dict[rp_uuid]
             summary = ProviderSummary(
                     resource_provider=rp_obj.ResourceProvider(
                         context, uuid=puuids.uuid,
@@ -561,7 +559,7 @@ def _check_traits_for_alloc_request(res_requests, summaries, prov_traits,
                                     required_traits, forbidden_traits):
     """Given a list of AllocationRequestResource objects, check if that
     combination can provide trait constraints. If it can, returns all
-    resource provider internal IDs in play, else return an empty list.
+    resource provider UUIDs in play, else return an empty list.
 
     TODO(tetsuro): For optimization, we should move this logic to SQL in
                    rp_obj.get_trees_matching_all().
@@ -570,18 +568,16 @@ def _check_traits_for_alloc_request(res_requests, summaries, prov_traits,
                          resource providers to be checked if they collectively
                          satisfy trait constraints in the required_traits and
                          forbidden_traits parameters.
-    :param summaries: dict, keyed by resource provider ID, of ProviderSummary
+    :param summaries: dict, keyed by resource provider UUID, of ProviderSummary
                       objects containing usage and trait information for
                       resource providers involved in the overall request
-    :param prov_traits: A dict, keyed by internal resource provider ID, of
+    :param prov_traits: A dict, keyed by resource provider UUID, of
                         string trait names associated with that provider
-    :param required_traits: A map, keyed by trait string name, of required
-                            trait internal IDs that each *allocation request's
-                            set of providers* must *collectively* have
-                            associated with them
-    :param forbidden_traits: A map, keyed by trait string name, of trait
-                             internal IDs that a resource provider must
-                             not have.
+    :param required_traits: A list of trait string names that each *allocation
+                            request's set of providers* must *collectively*
+                            have associated with them
+    :param forbidden_traits: A list of trait string names that a resource
+                             provider must not have.
     """
     all_prov_ids = []
     all_traits = set()
@@ -655,8 +651,10 @@ def _get_usages_by_provider_tree(ctx, root_uuids):
     for all resource providers in all trees indicated in the ``root_uuids``.
     """
     query = """
-            MATCH p=(rp:RESOURCE_PROVIDER)-->(inv)<-[:USES]-(cs)
+            MATCH (rp:RESOURCE_PROVIDER)-[*0..99]->()-[:PROVIDES]->(inv)
             WHERE rp.uuid IN %s
+            WITH rp, inv
+            OPTIONAL MATCH p=(inv)<-[:USES]-(cs)
             WITH rp, inv, last(relationships(p)) AS usages
             ORDER BY rp.uuid
             RETURN rp.uuid AS resource_provider_uuid,
@@ -666,7 +664,7 @@ def _get_usages_by_provider_tree(ctx, root_uuids):
                 inv.allocation_ratio AS allocation_ratio,
                 inv.max_unit AS max_unit,
                 sum(usages.amount) AS used
-    """ % rp_list
+    """ % list(root_uuids)
     result = db.execute(query)
     return result
 

@@ -150,11 +150,11 @@ class AllocationFixture(APIFixture):
         user_id = os.environ['USER_ID']
         alt_user_id = os.environ['ALT_USER_ID']
 
-        user = user_obj.User(self.context, external_id=user_id)
+        user = user_obj.User(self.context, uuid=user_id)
         user.create()
-        alt_user = user_obj.User(self.context, external_id=alt_user_id)
+        alt_user = user_obj.User(self.context, uuid=alt_user_id)
         alt_user.create()
-        project = project_obj.Project(self.context, external_id=project_id)
+        project = project_obj.Project(self.context, uuid=project_id)
         project.create()
 
         # Stealing from the super
@@ -273,7 +273,8 @@ class SharedStorageFixture(APIFixture):
             # mark it shared among any provider associated via aggregate
             tb.add_inventory(shared, orc.DISK_GB, 2000,
                              reserved=100, allocation_ratio=1.0)
-            tb.set_traits(shared, 'MISC_SHARES_VIA_AGGREGATE')
+#            tb.set_traits(shared, 'MISC_SHARES_VIA_AGGREGATE')
+            tb.set_sharing_among_agg(shared)
 
         # Populate PF inventory for VF
         for pf in (pf1_1, pf1_2, pf2_1, pf2_2):
@@ -358,6 +359,7 @@ class NUMAAggregateFixture(APIFixture):
             tb.add_inventory(ss, orc.DISK_GB, 2000,
                              reserved=100, allocation_ratio=1.0)
             tb.set_traits(ss, 'MISC_SHARES_VIA_AGGREGATE')
+            tb.set_sharing_among_agg(ss)
 
 
 class NonSharedStorageFixture(APIFixture):
@@ -479,18 +481,21 @@ class GranularFixture(APIFixture):
         tb.add_inventory(shr_disk_1, 'DISK_GB', 1000)
         tb.set_traits(shr_disk_1, 'MISC_SHARES_VIA_AGGREGATE',
                       'CUSTOM_DISK_SSD')
+        tb.set_sharing_among_agg(shr_disk_1)
 
         shr_disk_2 = tb.create_provider(
             self.context, 'shr_disk_2', uuids.aggA, uuids.aggB)
         os.environ['SHR_DISK_2'] = shr_disk_2.uuid
         tb.add_inventory(shr_disk_2, 'DISK_GB', 1000)
         tb.set_traits(shr_disk_2, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(shr_disk_2)
 
         shr_net = tb.create_provider(self.context, 'shr_net', uuids.aggC)
         os.environ['SHR_NET'] = shr_net.uuid
         tb.add_inventory(shr_net, 'SRIOV_NET_VF', 16)
         tb.add_inventory(shr_net, 'CUSTOM_NET_MBPS', 40000)
         tb.set_traits(shr_net, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(shr_net)
 
 
 class OpenPolicyFixture(APIFixture):

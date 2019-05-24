@@ -79,17 +79,15 @@ def _check_capacity_exceeded(ctx, allocs):
     rc_names = set([a.resource_class for a in allocs])
     provider_uuids = set([a.resource_provider.uuid for a in allocs])
     query = """
-            MATCH (rp:RESOURCE_PROVIDER)
+            MATCH (rp:RESOURCE_PROVIDER)-[:PROVIDES]->(rc)
             WHERE rp.uuid IN %s
-            WITH rp
-            MATCH (rp)-[*]->(rc)
-            WHERE labels(rc)[0] IN %s
+            AND labels(rc)[0] IN %s
             WITH rp, rc
             OPTIONAL MATCH p=(cs:CONSUMER)-[:USES]->(rc)
             WITH rp, rc, relationships(p)[0] AS allocs
             WITH rp, rc, sum(allocs.amount) AS total_usages
             RETURN rp, rc, labels(rc)[0] AS rc_name, total_usages
-    """ % (provider_uuids, rc_names)
+    """ % (list(provider_uuids), list(rc_names))
     result = db.execute(query)
 
     # Create a map keyed by (rp_uuid, res_class) for the records in the DB
@@ -160,7 +158,7 @@ def _check_capacity_exceeded(ctx, allocs):
         used = usage_record["total_usages"] or 0
         capacity = (total - reserved) * allocation_ratio
         if (capacity < (used + amount_needed) or
-                capacity < (used + rp_resource_class_sum[rp_uuid][rc_id])):
+                capacity < (used + rp_resource_class_sum[rp_uuid][rc_name])):
             LOG.warning(
                 "Over capacity for %(rc)s on resource provider %(rp)s. "
                 "Needed: %(needed)s, Used: %(used)s, Capacity: %(cap)s",
@@ -208,7 +206,7 @@ def _get_allocations_by_consumer_uuid(ctx, consumer_uuid):
             MATCH p=(cs:CONSUMER {uuid: '%s'})-[:USES]->(rc)
             WITH cs, rc, labels(rc)[0] AS rc_name,
                 relationships(p)[0] AS usages
-            MATCH (pj:PROJECT)-[:OWNS]->(user:USER)-[:OWNS]->(cs)
+            OPTIONAL MATCH (pj:PROJECT)-[:OWNS]->(user:USER)-[:OWNS]->(cs)
             WITH rc, rc_name, cs, usages, pj, user
             MATCH (rp:RESOURCE_PROVIDER)-[:PROVIDES]->(rc)
             RETURN rp, rc, rc_name, cs, usages, pj, user
@@ -216,6 +214,8 @@ def _get_allocations_by_consumer_uuid(ctx, consumer_uuid):
     result = db.execute(query)
     allocs = []
     for record in result:
+        pj_uuid = record["pj"].get("uuid") if record["pj"] else None
+        user_uuid = record["user"].get("uuid") if record["user"] else None
         allocs.append({
             "resource_provider_name": record["rp"]["name"],
             "resource_provider_uuid": record["rp"]["uuid"],
@@ -224,8 +224,8 @@ def _get_allocations_by_consumer_uuid(ctx, consumer_uuid):
             "used": record["usages"]["amount"],
             "consumer_uuid": record["cs"]["uuid"],
             "consumer_generation": record["cs"]["generation"],
-            "project_uuid": record["pj"]["uuid"],
-            "user_uuid": record["user"]["uuid"],
+            "project_uuid": pj_uuid,
+            "user_uuid": user_uuid,
         })
     return allocs
 
@@ -316,7 +316,7 @@ def _set_allocations(context, allocs):
             continue
         consumer_uuid = alloc.consumer.uuid
         rp = alloc.resource_provider
-        rc_name =alloc.resource_class
+        rc_name = alloc.resource_class
         query = """
                 MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
                 WITH rp
@@ -324,9 +324,9 @@ def _set_allocations(context, allocs):
                 WITH rp, rc
                 MATCH (cs:CONSUMER {uuid: '%s'})
                 WITH rp, rc, cs
-                CREATE p=(cs)-[:USES {amount: %s}->(rc)
+                CREATE p=(cs)-[:USES {amount: %s}]->(rc)
                 RETURN p
-        """ % (rp.uuid, rc_name, consumer_uuid)
+        """ % (rp.uuid, rc_name, consumer_uuid, alloc.used)
         result = db.execute(query)
 
     # Generation checking happens here. If the inventory for this resource
@@ -406,11 +406,11 @@ def get_all_by_consumer_id(context, consumer_id):
                 uuid=rec["resource_provider_uuid"],
                 name=rec["resource_provider_name"],
                 generation=rec["resource_provider_generation"]),
-            resource_class=rec["resource_class"],
+            resource_class=rec["resource_class_name"],
             consumer=consumer,
             used=rec["used"],
-            created_at=rec["created_at"],
-            updated_at=rec["updated_at"])
+            created_at=rec.get("created_at"),
+            updated_at=rec.get("updated_at"))
         for rec in db_allocs
     ]
     return alloc_list

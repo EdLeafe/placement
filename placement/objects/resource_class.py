@@ -69,12 +69,12 @@ class ResourceClass(object):
                 MATCH (rc:RESOURCE_CLASS {name: '%s'})
                 RETURN rc
         """ % name
-        result = db.execute(q)
+        result = db.execute(query)
         if not result:
             raise exception.ResourceClassNotFound(resource_class=name)
-        rec = result[0]
-        obj = cls(context, name=name, updated_at=rec["updated_at"],
-                created_at=rec["created_at"])
+        rec = db.pythonize(result[0])
+        obj = cls(context, name=name, updated_at=rec.get("updated_at"),
+                created_at=rec.get("created_at"))
         return obj
 
     @staticmethod
@@ -133,11 +133,13 @@ class ResourceClass(object):
     @staticmethod
     @db_api.placement_context_manager.writer
     def _create_in_db(context, updates):
+        created_at = updates.get("created_at", "timestamp()")
+        updated_at = updates.get("updated_at", "timestamp()")
         query = """
-                CREATE (rc:RESOURCE_CLASS {name: '%s', created_at: '%s',
-                    updated_at: '%s'})
+                CREATE (rc:RESOURCE_CLASS {name: '%s', created_at: %s,
+                    updated_at: %s})
                 RETURN rc
-        """ % (updates["name"], updates["created_at"], updates["updated_at"])
+        """ % (updates["name"], created_at, updated_at)
         try:
             result = db.execute(query)
         except db.ClientError:
@@ -149,18 +151,18 @@ class ResourceClass(object):
         if not self.name.startswith(orc.CUSTOM_NAMESPACE):
             raise exception.ResourceClassCannotDeleteStandard(
                     resource_class=self.name)
-        self._destroy(self._context, self.id, self.name)
+        self._destroy(self._context, self.name)
 
     @staticmethod
     @db_api.placement_context_manager.writer
-    def _destroy(context, _id, name):
+    def _destroy(context, name):
         # Don't delete the resource class if it exists as being provided by a
         # resource provider.
         query = """
                 MATCH ()-[:PROVIDES]->(rc)
                 WHERE labels(rc)[0] = '%s'
                 RETURN rc
-        """
+        """ % name
         result = db.execute(query)
         if result:
             raise exception.ResourceClassInUse(resource_class=name)
@@ -169,7 +171,7 @@ class ResourceClass(object):
                 MATCH (rc:RESOURCE_CLASS {name: '%s'})
                 WITH rc
                 DELETE rc
-        """
+        """ % name
         result = db.execute(query)
 
     def save(self):
@@ -220,31 +222,39 @@ def get_all(context):
             RETURN rc
     """
     result = db.execute(query)
-    return [ResourceClass(context, **rc) for rc in result["rc"]]
+    result_objs = [db.pythonize(rec["rc"]) for rec in result]
+    return [ResourceClass(context, **obj) for obj in result_objs]
 
 
 @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 @db_api.placement_context_manager.writer
 def _resource_classes_sync(ctx):
     # Create a set of all resource class in the os_resource_classes library.
+
     query = """
             MATCH (rc:RESOURCE_CLASS)
             RETURN rc.name AS name
     """
     result = db.execute(query)
-    db_std_classes = [res["name"] for res in result
-            if not orc.is_custom(res["name"])]
-    LOG.debug("Found existing resource classes in db: %s", db_classes)
+    db_std_classes = []
+    if result:
+        db_std_classes = [res["name"] for res in result
+                if not orc.is_custom(res["name"])]
+    LOG.debug("Found existing resource classes in db: %s", db_std_classes)
     # Determine those resource clases which are in os_resource_classes but not
     # currently in the database, and insert them.
     missing_rc_names = [name for name in orc.STANDARDS
             if name not in db_std_classes]
-    query = """
-            UNWIND %s AS rcname
-            CREATE (:RESOURCE_CLASS {name: rcname, created_at: timestamp(),
-                updated_at: timestamp()})
-    """ % missing_rc_names
-    try:
-        result = db.execute(query)
-    except db_exc.DBDuplicateEntry:
+    for rc_name in missing_rc_names:
+        query = """
+                MERGE (rc:RESOURCE_CLASS {name: '%s', created_at: timestamp(),
+                    updated_at: timestamp()})
+        """ % rc_name
+        try:
+            result = db.execute(query)
+        except db.ClientError:
             pass  # some other process sync'd, just ignore
+        except db.TransientError as e:
+            LOG.error("Transient errror creating Resource Class '%s': %s" %
+                    (rc_name, e))
+                

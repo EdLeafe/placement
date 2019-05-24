@@ -14,7 +14,6 @@ import os_resource_classes as orc
 import os_traits
 from oslo_utils.fixture import uuidsentinel as uuids
 import six
-import sqlalchemy as sa
 
 from placement import exception
 from placement import lib as placement_lib
@@ -27,7 +26,7 @@ from placement.tests.functional.db import test_base as tb
 
 class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
-    def test_get_provider_ids_matching(self):
+    def test_get_provider_uuids_matching(self):
         # These RPs are named based on whether we expect them to be 'incl'uded
         # or 'excl'uded in the result.
 
@@ -154,7 +153,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         empty_root_id = None
 
         # Run it!
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             empty_agg, empty_forbidden_aggs, empty_root_id)
 
@@ -168,10 +167,10 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         # associated any traits with the providers
         avx2_t = trait_obj.Trait.get_by_name(
             self.ctx, os_traits.HW_CPU_X86_AVX2)
-        # get_provider_ids_matching()'s required_traits and forbidden_traits
+        # get_provider_uuids_matching()'s required_traits and forbidden_traits
         # arguments maps, keyed by trait name, of the trait internal ID
         req_traits = {os_traits.HW_CPU_X86_AVX2: avx2_t.id}
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, req_traits, empty_forbidden_traits, empty_agg,
             empty_forbidden_aggs, empty_root_id)
 
@@ -180,7 +179,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         # Next let's set the required trait to an excl_* RPs.
         # This should result in no results returned as well.
         excl_big_md_noalloc.set_traits([avx2_t])
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, req_traits, empty_forbidden_traits, empty_agg,
             empty_forbidden_aggs, empty_root_id)
         self.assertEqual([], res)
@@ -188,30 +187,30 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         # OK, now add the trait to one of the incl_* providers and verify that
         # provider now shows up in our results
         incl_biginv_noalloc.set_traits([avx2_t])
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, req_traits, empty_forbidden_traits, empty_agg,
             empty_forbidden_aggs, empty_root_id)
 
-        rp_ids = [r[0] for r in res]
-        self.assertEqual([incl_biginv_noalloc.id], rp_ids)
+        rp_uuids = [r[0] for r in res]
+        self.assertEqual([incl_biginv_noalloc.id], rp_uuids)
 
-        # Let's see if the tree_root_id filter works
+        # Let's see if the tree_root_uuid filter works
         root_id = incl_biginv_noalloc.id
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             empty_agg, empty_forbidden_aggs, root_id)
-        rp_ids = [r[0] for r in res]
-        self.assertEqual([incl_biginv_noalloc.id], rp_ids)
+        rp_uuids = [r[0] for r in res]
+        self.assertEqual([incl_biginv_noalloc.id], rp_uuids)
 
         # We don't get anything if the specified tree doesn't satisfy the
         # requirements in the first place
         root_id = excl_allused.id
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             empty_agg, empty_forbidden_aggs, root_id)
         self.assertEqual([], res)
 
-    def test_get_provider_ids_matching_with_multiple_forbidden(self):
+    def test_get_provider_uuids_matching_with_multiple_forbidden(self):
         rp1 = self._create_provider('rp1', uuids.agg1)
         tb.add_inventory(rp1, orc.VCPU, 64)
 
@@ -231,12 +230,12 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         empty_forbidden_aggs = []
         empty_root_id = None
 
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, forbidden_traits, member_of,
             empty_forbidden_aggs, empty_root_id)
         self.assertEqual({(rp1.id, rp1.id)}, set(res))
 
-    def test_get_provider_ids_matching_with_aggregates(self):
+    def test_get_provider_uuids_matching_with_aggregates(self):
         rp1 = self._create_provider('rp1', uuids.agg1, uuids.agg2)
         rp2 = self._create_provider('rp2', uuids.agg2, uuids.agg3)
         rp3 = self._create_provider('rp3', uuids.agg3, uuids.agg4)
@@ -258,7 +257,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         member_of = [[uuids.agg1]]
         expected_rp = [rp1, rp4]
 
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             member_of, empty_forbidden_aggs, empty_root_id)
         self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
@@ -266,7 +265,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         member_of = [[uuids.agg1, uuids.agg2]]
         expected_rp = [rp1, rp2, rp4]
 
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             member_of, empty_forbidden_aggs, empty_root_id)
         self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
@@ -275,7 +274,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
                      [uuids.agg4]]
         expected_rp = [rp4]
 
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             member_of, empty_forbidden_aggs, empty_root_id)
         self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
@@ -284,7 +283,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         forbidden_aggs = [uuids.agg1]
         expected_rp = [rp2, rp3, rp5]
 
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             empty_member_of, forbidden_aggs, empty_root_id)
         self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
@@ -292,7 +291,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         forbidden_aggs = [uuids.agg1, uuids.agg2]
         expected_rp = [rp3, rp5]
 
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             empty_member_of, forbidden_aggs, empty_root_id)
         self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
@@ -301,7 +300,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         forbidden_aggs = [uuids.agg3, uuids.agg4]
         expected_rp = [rp1]
 
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             member_of, forbidden_aggs, empty_root_id)
         self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
@@ -310,7 +309,7 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         forbidden_aggs = [uuids.agg1]
         expected_rp = []
 
-        res = rp_obj.get_provider_ids_matching(
+        res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
             member_of, forbidden_aggs, empty_root_id)
         self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
@@ -371,16 +370,18 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
 class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
-    def _get_rp_ids_matching_names(self, names):
-        """Utility function to look up resource provider IDs from a set of
-        supplied provider names directly from the API DB.
+    def _get_rp_uuids_matching_names(self, names):
+        """Utility function to look up resource provider UUIDs from a set of
+        supplied provider names directly from the DB.
         """
         names = map(six.text_type, names)
-        sel = sa.select([rp_obj._RP_TBL.c.id])
-        sel = sel.where(rp_obj._RP_TBL.c.name.in_(names))
-        with self.placement_db.get_engine().connect() as conn:
-            rp_ids = set([r[0] for r in conn.execute(sel)])
-        return rp_ids
+        query = """
+                MATCH (rp)
+                WHERE rp.name IN %s
+                RETURN rp.uuid AS rp_uuid
+        """ % names
+        result = db.execute(query)
+        return set([rec["rp_uuid"] for rec in result])
 
     def test_get_trees_matching_all(self):
         """Creates a few provider trees having different inventories and
@@ -402,16 +403,16 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
             sharing = kwargs.get('sharing_providers', {})
             member_of = kwargs.get('member_of', [])
             forbidden_aggs = kwargs.get('forbidden_aggs', [])
-            tree_root_id = kwargs.get('tree_root_id', None)
+            tree_root_uuid = kwargs.get('tree_root_uuid', None)
 
             results = rp_obj.get_trees_matching_all(
                 self.ctx, resources, req_traits, forbid_traits, sharing,
-                member_of, forbidden_aggs, tree_root_id)
+                member_of, forbidden_aggs, tree_root_uuid)
 
-            tree_ids = self._get_rp_ids_matching_names(expected_trees)
-            rp_ids = self._get_rp_ids_matching_names(expected_rps)
+            tree_ids = self._get_rp_uuids_matching_names(expected_trees)
+            rp_uuids = self._get_rp_uuids_matching_names(expected_rps)
             self.assertEqual(tree_ids, results.trees)
-            self.assertEqual(rp_ids, results.rps)
+            self.assertEqual(rp_uuids, results.rps)
 
         # Before we even set up any providers, verify that the short-circuits
         # work to return empty lists
@@ -472,11 +473,11 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
                         'cn3', 'cn3_numa0_pf0', 'cn3_numa1_pf1']
         _run_test(expected_trees, expected_rps)
 
-        # Let's see if the tree_root_id filter works
+        # Let's see if the tree_root_uuid filter works
         expected_trees = ['cn1']
         expected_rps = ['cn1', 'cn1_numa0_pf0', 'cn1_numa1_pf1']
-        tree_root_id = self.get_provider_id_by_name('cn1')
-        _run_test(expected_trees, expected_rps, tree_root_id=tree_root_id)
+        tree_root_uuid = self.get_provider_uuid_by_name('cn1')
+        _run_test(expected_trees, expected_rps, tree_root_uuid=tree_root_uuid)
 
         # Let's see if the aggregate filter works
 
@@ -734,11 +735,11 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
 
-        tree_root_ids = set([p[1] for p in rp_tuples_with_trait])
+        tree_root_uuids = set([p[1] for p in rp_tuples_with_trait])
 
         provider_names = ['cn1', 'cn3']
-        expect_root_ids = self._get_rp_ids_matching_names(provider_names)
-        self.assertEqual(expect_root_ids, tree_root_ids)
+        expect_root_uuids = self._get_rp_ids_matching_names(provider_names)
+        self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case1': required on root with forbidden traits
         # Let's validate that cn3 dissapears
@@ -752,11 +753,11 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
 
-        tree_root_ids = set([p[1] for p in rp_tuples_with_trait])
+        tree_root_uuids = set([p[1] for p in rp_tuples_with_trait])
 
         provider_names = ['cn1']
-        expect_root_ids = self._get_rp_ids_matching_names(provider_names)
-        self.assertEqual(expect_root_ids, tree_root_ids)
+        expect_root_uuids = self._get_rp_ids_matching_names(provider_names)
+        self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case2: multiple required on root
         required_traits = {
@@ -768,11 +769,11 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
 
-        tree_root_ids = set([p[1] for p in rp_tuples_with_trait])
+        tree_root_uuids = set([p[1] for p in rp_tuples_with_trait])
 
         provider_names = ['cn3']
-        expect_root_ids = self._get_rp_ids_matching_names(provider_names)
-        self.assertEqual(expect_root_ids, tree_root_ids)
+        expect_root_uuids = self._get_rp_ids_matching_names(provider_names)
+        self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case3: required on child
         required_traits = {
@@ -783,11 +784,11 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
 
-        tree_root_ids = set([p[1] for p in rp_tuples_with_trait])
+        tree_root_uuids = set([p[1] for p in rp_tuples_with_trait])
 
         provider_names = ['cn1', 'cn4', 'cn5']
-        expect_root_ids = self._get_rp_ids_matching_names(provider_names)
-        self.assertEqual(expect_root_ids, tree_root_ids)
+        expect_root_uuids = self._get_rp_ids_matching_names(provider_names)
+        self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case3': required on child with forbidden traits
         # Let's validate that cn4 dissapears
@@ -801,11 +802,11 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
 
-        tree_root_ids = set([p[1] for p in rp_tuples_with_trait])
+        tree_root_uuids = set([p[1] for p in rp_tuples_with_trait])
 
         provider_names = ['cn1', 'cn5']
-        expect_root_ids = self._get_rp_ids_matching_names(provider_names)
-        self.assertEqual(expect_root_ids, tree_root_ids)
+        expect_root_uuids = self._get_rp_ids_matching_names(provider_names)
+        self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case4: multiple required on child
         required_traits = {
@@ -817,11 +818,11 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
 
-        tree_root_ids = set([p[1] for p in rp_tuples_with_trait])
+        tree_root_uuids = set([p[1] for p in rp_tuples_with_trait])
 
         provider_names = ['cn4', 'cn5']
-        expect_root_ids = self._get_rp_ids_matching_names(provider_names)
-        self.assertEqual(expect_root_ids, tree_root_ids)
+        expect_root_uuids = self._get_rp_ids_matching_names(provider_names)
+        self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case5: required on root and child
         required_traits = {
@@ -833,11 +834,11 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
 
-        tree_root_ids = set([p[1] for p in rp_tuples_with_trait])
+        tree_root_uuids = set([p[1] for p in rp_tuples_with_trait])
 
         provider_names = ['cn1']
-        expect_root_ids = self._get_rp_ids_matching_names(provider_names)
-        self.assertEqual(expect_root_ids, tree_root_ids)
+        expect_root_uuids = self._get_rp_ids_matching_names(provider_names)
+        self.assertEqual(expect_root_uuids, tree_root_uuids)
 
 
 class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
@@ -1082,6 +1083,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         # following test.
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.VCPU, 8)
 
         alloc_cands = self._get_allocation_candidates(
@@ -1306,6 +1308,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         # Mark the shared storage pool as having inventory shared among any
         # provider associated via aggregate
         tb.set_traits(ss, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss)
 
         # Ask for the alternative placement possibilities and verify each
         # compute node provider is listed in the allocation requests as well as
@@ -1524,6 +1527,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         # Mark the magic provider as having inventory shared among any provider
         # associated via aggregate
         tb.set_traits(magic_p, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(magic_p)
 
         # The resources we will request
         requested_resources = {
@@ -1592,6 +1596,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         tb.add_inventory(ss, orc.DISK_GB, 2000, reserved=100, min_unit=10)
 
         tb.set_traits(ss, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss)
 
         alloc_cands = self._get_allocation_candidates()
 
@@ -1743,6 +1748,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
 
         ss = self._create_provider('ss', uuids.agg1)
         tb.set_traits(ss, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss)
         tb.add_inventory(ss, orc.DISK_GB, 2000)
 
         alloc_cands = self._get_allocation_candidates()
@@ -1822,6 +1828,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         tb.add_inventory(ss, orc.DISK_GB, 1600)
         # The shared storage's disk is RAID
         tb.set_traits(ss, 'MISC_SHARES_VIA_AGGREGATE', 'CUSTOM_RAID')
+        tb.set_sharing_among_agg(ss)
 
         alloc_cands = self._get_allocation_candidates(
             {'': placement_lib.RequestGroup(
@@ -1859,6 +1866,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
     def test_only_one_sharing_provider(self):
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.IPV4_ADDRESS, 24)
         tb.add_inventory(ss1, orc.SRIOV_NET_VF, 16)
         tb.add_inventory(ss1, orc.DISK_GB, 1600)
@@ -1893,10 +1901,12 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
     def test_all_sharing_providers_no_rc_overlap(self):
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.IPV4_ADDRESS, 24)
 
         ss2 = self._create_provider('ss2', uuids.agg1)
         tb.set_traits(ss2, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss2)
         tb.add_inventory(ss2, orc.DISK_GB, 1600)
 
         alloc_cands = self._get_allocation_candidates(
@@ -1928,11 +1938,13 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
     def test_all_sharing_providers_no_rc_overlap_more_classes(self):
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.IPV4_ADDRESS, 24)
         tb.add_inventory(ss1, orc.SRIOV_NET_VF, 16)
 
         ss2 = self._create_provider('ss2', uuids.agg1)
         tb.set_traits(ss2, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss2)
         tb.add_inventory(ss2, orc.DISK_GB, 1600)
 
         alloc_cands = self._get_allocation_candidates(
@@ -1967,12 +1979,14 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
     def test_all_sharing_providers(self):
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.IPV4_ADDRESS, 24)
         tb.add_inventory(ss1, orc.SRIOV_NET_VF, 16)
         tb.add_inventory(ss1, orc.DISK_GB, 1600)
 
         ss2 = self._create_provider('ss2', uuids.agg1)
         tb.set_traits(ss2, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss2)
         tb.add_inventory(ss2, orc.SRIOV_NET_VF, 16)
         tb.add_inventory(ss2, orc.DISK_GB, 1600)
 
@@ -2040,6 +2054,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
 
         ss1 = self._create_provider('ss1', uuids.agg1, uuids.agg2)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.DISK_GB, 1600)
 
         alloc_cands = self._get_allocation_candidates(
@@ -2091,16 +2106,19 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         # ss1 is connected to both cn1 and cn2
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.DISK_GB, 1600)
 
         # ss2 only connected to cn2
         ss2 = self._create_provider('ss2', uuids.agg2)
         tb.set_traits(ss2, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss2)
         tb.add_inventory(ss2, orc.IPV4_ADDRESS, 24)
 
         # ss3 only connected to cn1
         ss3 = self._create_provider('ss3', uuids.agg3)
         tb.set_traits(ss3, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss3)
         tb.add_inventory(ss3, orc.IPV4_ADDRESS, 24)
 
         alloc_cands = self._get_allocation_candidates(
@@ -2160,15 +2178,18 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.add_inventory(ss1, orc.DISK_GB, 2000)
         tb.set_traits(ss1, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss1)
 
         cn2 = self._create_provider('cn2', uuids.agg2)
         tb.add_inventory(cn2, orc.VCPU, 24)
         ss2_1 = self._create_provider('ss2_1', uuids.agg2)
         tb.add_inventory(ss2_1, orc.MEMORY_MB, 2048)
         tb.set_traits(ss2_1, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss2_1)
         ss2_2 = self._create_provider('ss2_2', uuids.agg2)
         tb.add_inventory(ss2_2, orc.DISK_GB, 2000)
         tb.set_traits(ss2_2, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss2_2)
 
         alloc_cands = self._get_allocation_candidates()
         expected = [
@@ -2217,18 +2238,22 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         ss1_1 = self._create_provider('ss1_1', uuids.agg1)
         tb.add_inventory(ss1_1, orc.DISK_GB, 2000)
         tb.set_traits(ss1_1, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss1_1)
         ss1_2 = self._create_provider('ss1_2', uuids.agg1)
         tb.add_inventory(ss1_2, orc.DISK_GB, 2000)
         tb.set_traits(ss1_2, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss1_2)
 
         cn2 = self._create_provider('cn2', uuids.agg2)
         tb.add_inventory(cn2, orc.VCPU, 24)
         ss2_1 = self._create_provider('ss2_1', uuids.agg2)
         tb.add_inventory(ss2_1, orc.MEMORY_MB, 2048)
         tb.set_traits(ss2_1, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss2_1)
         ss2_2 = self._create_provider('ss2_2', uuids.agg2)
         tb.add_inventory(ss2_2, orc.DISK_GB, 2000)
         tb.set_traits(ss2_2, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss2_2)
 
         alloc_cands = self._get_allocation_candidates()
         expected = [
@@ -2284,16 +2309,19 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         # ss1 is connected to cn1
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.DISK_GB, 1600)
 
         # ss2 is connected to both cn1 and cn2
         ss2 = self._create_provider('ss2', uuids.agg2)
         tb.set_traits(ss2, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss2)
         tb.add_inventory(ss2, orc.DISK_GB, 1600)
 
         # ss3 is connected to cn2
         ss3 = self._create_provider('ss3', uuids.agg3)
         tb.set_traits(ss3, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss3)
         tb.add_inventory(ss3, orc.DISK_GB, 1600)
 
         # Let's get allocation candidates from agg1
@@ -2452,6 +2480,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
 
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.DISK_GB, 1600)
 
         cn1 = self._create_provider('cn1', uuids.agg1, uuids.agg2)
@@ -2460,6 +2489,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
 
         ss2 = self._create_provider('ss2', uuids.agg2)
         tb.set_traits(ss2, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss2)
         tb.add_inventory(ss2, orc.IPV4_ADDRESS, 24)
         tb.add_inventory(ss2, orc.SRIOV_NET_VF, 16)
 
@@ -2505,6 +2535,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
 
         ss1 = self._create_provider('ss1', uuids.agg1)
         tb.set_traits(ss1, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss1)
         tb.add_inventory(ss1, orc.DISK_GB, 1600)
 
         cn1 = self._create_provider('cn1', uuids.agg1, uuids.agg2)
@@ -2513,6 +2544,7 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
 
         ss2 = self._create_provider('ss2', uuids.agg2)
         tb.set_traits(ss2, "MISC_SHARES_VIA_AGGREGATE")
+        tb.set_sharing_among_agg(ss2)
         tb.add_inventory(ss2, orc.IPV4_ADDRESS, 24)
         tb.add_inventory(ss2, orc.SRIOV_NET_VF, 16)
 
@@ -2855,7 +2887,9 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         tb.add_inventory(ss1, orc.DISK_GB, 2000)
         tb.add_inventory(ss2, orc.DISK_GB, 1000)
         tb.set_traits(ss1, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss1)
         tb.set_traits(ss2, 'MISC_SHARES_VIA_AGGREGATE')
+        tb.set_sharing_among_agg(ss2)
 
         alloc_cands = self._get_allocation_candidates({
             '': placement_lib.RequestGroup(

@@ -49,54 +49,47 @@ DISK_ALLOCATION = dict(
 def create_provider(context, name, *aggs, **kwargs):
     parent = kwargs.get('parent')
     uuid = kwargs.get('uuid', getattr(uuids, name))
-
-    query = """
-            CREATE (rp:RESOURCE_PROVIDER {name: '%s', uuid: '%s',
-                generation: 0, created_at: timestamp(),
-                updated_at: timestamp()})
-            RETURN rp
-            """ % (name, uuid)
-    try:
-        result = db.execute(query)
-    except db.ClientError as e:
-        if "ConstraintValidationFailed" in str(e):
-            if "property `uuid`" in str(e):
-                duplicate = "uuid: %s" % data.get("uuid")
-            else:
-                duplicate = "name: %s" % data.get("name")
-            raise webob.exc.HTTPConflict("Conflicting resource provider "
-                    "%(duplicate)s already exists." % {'duplicate': duplicate},
-                    comment=errors.DUPLICATE_NAME)
-    rp = db.pythonize(result[0]["rp"])
-    rp._context = context
+    rp = rp_obj.ResourceProvider(context, name=name, uuid=uuid)
     if parent:
-        query = """
-                MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
-                RETURN parent
-                """ % (uuid, parent)
-        result = db.execute(query)
-
-        query = """
-                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
-                MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
-                WITH rp, parent
-                CREATE (parent)-[:PROVIDES]->(rp)
-                RETURN parent
-                """ % (uuid, parent)
-        result = db.execute(query)
-
+        rp.parent_provider_uuid = parent
+    rp.create()
     if aggs:
-
-        import pudb
-        pudb.set_trace()
         rp.set_aggregates(aggs)
     return rp
 
 
+def set_sharing_among_agg(rp):
+    """Given a sharing provider, sets the [:ASSOCIATED] relationship with any
+    other resource providers in the aggregates that the sharing provider is in.
+
+    This is a bit of a hack to get things working with graph relationships,
+    given the previous, even hackier, approach of using the
+    MISC_SHARES_VIA_AGGREGATE trait as a sharing flag.
+    """
+    # First, get the aggregates that the sharing provider is associated with.
+    agg_uuids = rp.get_aggregates()
+    if not agg_uuids:
+        return
+    providers = rp_obj.provider_ids_matching_aggregates(rp._context, agg_uuids)
+    if not providers:
+        return
+    # Now set the ASSOCIATED relationship.
+    query = """
+            MATCH (share:RESOURCE_PROVIDER {uuid: '%s'})
+            WITH share
+            MATCH (target:RESOURCE_PROVIDER)
+            WHERE target.uuid IN %s
+            WITH share, target
+            MERGE (target)-[:ASSOCIATED]->(share)
+            RETURN target
+    """ % (rp.uuid, providers)
+    result = db.execute(query)
+
+
+
 def add_inventory(rp, rc, total, **kwargs):
     kwargs.setdefault('max_unit', total)
-    inv = inv_obj.Inventory(rp._context, resource_provider=rp,
-                            resource_class=rc, total=total, **kwargs)
+    inv = inv_obj.Inventory(rp, resource_class=rc, total=total, **kwargs)
     rp.add_inventory(inv)
     return inv
 
@@ -104,6 +97,7 @@ def add_inventory(rp, rc, total, **kwargs):
 def set_traits(rp, *traits):
     tlist = []
     for tname in traits:
+        trait = None
         try:
             trait = trait_obj.Trait.get_by_name(rp._context, tname)
         except exception.TraitNotFound:
@@ -114,15 +108,15 @@ def set_traits(rp, *traits):
     return tlist
 
 
-def ensure_consumer(ctx, user, project, consumer_id=None):
+def ensure_consumer(ctx, user, project, consumer_uuid=None):
     # NOTE(efried): If not specified, use a random consumer UUID - we don't
     # want to override any existing allocations from the test case.
-    consumer_id = consumer_id or uuidutils.generate_uuid()
+    consumer_uuid = consumer_uuid or uuidutils.generate_uuid()
     try:
-        consumer = consumer_obj.Consumer.get_by_uuid(ctx, consumer_id)
+        consumer = consumer_obj.Consumer.get_by_uuid(ctx, consumer_uuid)
     except exception.NotFound:
         consumer = consumer_obj.Consumer(
-            ctx, uuid=consumer_id, user=user, project=project)
+            ctx, uuid=consumer_uuid, user=user, project=project)
         consumer.create()
     return consumer
 
@@ -145,15 +139,13 @@ class PlacementDbBaseTestCase(base.TestCase):
         # we use context in some places and ctx in other. We should only use
         # context, but let's paper over that for now.
         self.ctx = self.context
-        self.user_obj = user_obj.User(self.ctx, external_id='fake-user')
+        self.user_obj = user_obj.User(self.ctx, uuid=uuids.user)
         self.user_obj.create()
-        self.project_obj = project_obj.Project(
-            self.ctx, external_id='fake-project')
+        self.project_obj = project_obj.Project(self.ctx, uuid=uuids.project)
         self.project_obj.create()
         # For debugging purposes, populated by _create_provider and used by
         # _validate_allocation_requests to make failure results more readable.
         self.rp_uuid_to_name = {}
-        self.rp_id_to_name = {}
 
     def _assert_traits(self, expected_traits, traits_objs):
         expected_traits.sort()
@@ -171,11 +163,10 @@ class PlacementDbBaseTestCase(base.TestCase):
     def _create_provider(self, name, *aggs, **kwargs):
         rp = create_provider(self.ctx, name, *aggs, **kwargs)
         self.rp_uuid_to_name[rp.uuid] = name
-        self.rp_id_to_name[rp.id] = name
         return rp
 
-    def get_provider_id_by_name(self, name):
-        rp_ids = [k for k, v in self.rp_id_to_name.items() if v == name]
+    def get_provider_uuid_by_name(self, name):
+        rp_ids = [k for k, v in self.rp_uuid_to_name.items() if v == name]
         if not len(rp_ids) == 1:
             raise Exception
         return rp_ids[0]

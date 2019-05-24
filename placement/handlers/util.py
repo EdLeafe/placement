@@ -58,7 +58,7 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
     except exception.NotFound:
         # Auto-create the project if we found no record of it...
         try:
-            proj = project_obj.Project(ctx, external_id=project_id)
+            proj = project_obj.Project(ctx, uuid=project_id)
             proj.create()
         except exception.ProjectExists:
             # No worries, another thread created this project already
@@ -68,7 +68,7 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
     except exception.NotFound:
         # Auto-create the user if we found no record of it...
         try:
-            user = user_obj.User(ctx, external_id=user_id)
+            user = user_obj.User(ctx, uuid=user_id)
             user.create()
         except exception.UserExists:
             # No worries, another thread created this user already
@@ -109,8 +109,8 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
         # same transaction context is used for both util.ensure_consumer() and
         # AllocationList.replace_all() within the same HTTP request, but need
         # to test this to be 100% certain...
-        if (project_id != consumer.project.external_id or
-                user_id != consumer.user.external_id):
+        if (project_id != consumer.project.uuid or
+                user_id != consumer.user.uuid):
             LOG.debug("Supplied project or user ID for consumer %s was "
                       "different than existing record. Updating consumer "
                       "record.", consumer_uuid)

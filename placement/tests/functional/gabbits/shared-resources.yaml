@@ -115,12 +115,12 @@ tests:
       $.allocation_requests.`len`: 0
       $.provider_summaries.`len`: 0
 
-- name: set trait shared
-  PUT: /resource_providers/d450bd39-3b01-4355-9ea1-594f96594cf1/traits
+- name: associate cn1 with shared
+  POST: /resource_providers/d450bd39-3b01-4355-9ea1-594f96594cf1/associate
   data:
-      resource_provider_generation: 2
-      traits:
-          - MISC_SHARES_VIA_AGGREGATE
+      targets:
+        - 8d830468-6395-46b0-b56a-f934a1d60bbe
+  status: 204
 
 # this should be zero because we only expect those resource providers which
 # can fully satisfy the resources query themselves when making requests of

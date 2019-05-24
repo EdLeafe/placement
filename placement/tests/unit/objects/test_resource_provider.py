@@ -19,13 +19,11 @@ from placement.objects import resource_provider
 from placement.tests.unit.objects import base
 
 
-_RESOURCE_CLASS_ID = 2
+_RESOURCE_CLASS_NAME = "TEST_RC"
 
-_RESOURCE_PROVIDER_ID = 1
 _RESOURCE_PROVIDER_UUID = uuids.resource_provider
 _RESOURCE_PROVIDER_NAME = six.text_type(uuids.resource_name)
 _RESOURCE_PROVIDER_DB = {
-    'id': _RESOURCE_PROVIDER_ID,
     'uuid': _RESOURCE_PROVIDER_UUID,
     'name': _RESOURCE_PROVIDER_NAME,
     'generation': 0,
@@ -35,11 +33,9 @@ _RESOURCE_PROVIDER_DB = {
     'created_at': timeutils.utcnow(with_timezone=True),
 }
 
-_RESOURCE_PROVIDER_ID2 = 2
 _RESOURCE_PROVIDER_UUID2 = uuids.resource_provider2
 _RESOURCE_PROVIDER_NAME2 = uuids.resource_name2
 _RESOURCE_PROVIDER_DB2 = {
-    'id': _RESOURCE_PROVIDER_ID2,
     'uuid': _RESOURCE_PROVIDER_UUID2,
     'name': _RESOURCE_PROVIDER_NAME2,
     'generation': 0,
@@ -48,35 +44,26 @@ _RESOURCE_PROVIDER_DB2 = {
 }
 
 
-_ALLOCATION_ID = 2
 _ALLOCATION_DB = {
-    'id': _ALLOCATION_ID,
-    'resource_provider_id': _RESOURCE_PROVIDER_ID,
-    'resource_class_id': _RESOURCE_CLASS_ID,
+    'resource_provider_uuid': _RESOURCE_PROVIDER_UUID,
+    'resource_class_name': _RESOURCE_CLASS_NAME,
     'consumer_uuid': uuids.fake_instance,
-    'consumer_id': 1,
     'consumer_generation': 0,
     'used': 8,
-    'user_id': 1,
-    'user_external_id': uuids.user_id,
-    'project_id': 1,
-    'project_external_id': uuids.project_id,
+    'user_uuid': uuids.user_id,
+    'project_uuid': uuids.project_id,
     'updated_at': timeutils.utcnow(with_timezone=True),
     'created_at': timeutils.utcnow(with_timezone=True),
 }
 
 _ALLOCATION_BY_CONSUMER_DB = {
-    'id': _ALLOCATION_ID,
-    'resource_provider_id': _RESOURCE_PROVIDER_ID,
-    'resource_class_id': _RESOURCE_CLASS_ID,
+    'resource_provider_uuid': _RESOURCE_PROVIDER_UUID,
+    'resource_class_name': _RESOURCE_CLASS_NAME,
     'consumer_uuid': uuids.fake_instance,
-    'consumer_id': 1,
     'consumer_generation': 0,
     'used': 8,
-    'user_id': 1,
-    'user_external_id': uuids.user_id,
-    'project_id': 1,
-    'project_external_id': uuids.project_id,
+    'user_uuid': uuids.user_id,
+    'project_uuid': uuids.project_id,
     'updated_at': timeutils.utcnow(with_timezone=True),
     'created_at': timeutils.utcnow(with_timezone=True),
     'resource_provider_name': _RESOURCE_PROVIDER_NAME,
@@ -90,7 +77,6 @@ class TestResourceProviderNoDB(base.TestCase):
     def test_create_id_fail(self):
         obj = resource_provider.ResourceProvider(context=self.context,
                                                  uuid=_RESOURCE_PROVIDER_UUID,
-                                                 id=_RESOURCE_PROVIDER_ID)
         self.assertRaises(exception.ObjectActionError,
                           obj.create)
 

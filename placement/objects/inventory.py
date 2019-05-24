@@ -88,7 +88,7 @@ def _get_inventory_by_provider_uuid(ctx, rp_uuid):
     ret = []
     for rec in result:
         inv = {"name": rec["name"]}
-        for k, v in rec["rc"]:
+        for k, v in rec["rc"].items():
             if k not in inv_props:
                 continue
             inv[k] = v

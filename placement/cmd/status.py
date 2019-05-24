@@ -10,7 +10,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import sqlalchemy as sa
 import sys
 
 from oslo_config import cfg
@@ -33,10 +32,8 @@ class Checks(upgradecheck.UpgradeCommands):
 
     @db_api.placement_context_manager.reader
     def _check_missing_root_ids(self, ctxt):
-        exists = sa.exists().where(
-            models.ResourceProvider.root_provider_id == sa.null())
-        ret = ctxt.session.query(exists).scalar()
-        return ret
+        # NOTE(edleafe): This doesn't apply in a graph DB
+        return 0
 
     def _check_root_provider_ids(self):
         """Starting in Queens with the 1.28 microversion, resource_providers

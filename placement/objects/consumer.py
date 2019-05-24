@@ -58,11 +58,8 @@ def delete_consumers_if_no_allocations(ctx, consumer_uuids):
     """
     # Delete consumers that have no usages
     query = """
-            MATCH p=(cs:CONSUMER)-[:USES*0..1]->(rc)
-            WITH cs, relationships(p)[0] AS usage
-            WITH cs, size(usage) As num
-            WITH cs, sum(num) AS relnum
-            WHERE relnum = 0
+            MATCH (cs:CONSUMER)
+            WHERE NOT (cs)-[:USES]->() 
             DELETE cs
     """
     db.execute(query)
@@ -75,9 +72,9 @@ def _get_consumer_by_uuid(ctx, uuid):
     query = """
             MATCH (cs:CONSUMER {uuid: '%s'})
             WITH cs
-            MATCH (pj:PROJECT)-[:OWNS]->(cs)
+            OPTIONAL MATCH (pj:PROJECT)-[:OWNS]->(cs)
             WITH cs, pj
-            MATCH (u:USER)-[:BELONGS_TO]->(pj)
+            OPTIONAL MATCH (u:USER)-[:BELONGS_TO]->(pj)
             RETURN cs, pj, u
     """ % uuid
     result = db.execute(query)
@@ -85,14 +82,16 @@ def _get_consumer_by_uuid(ctx, uuid):
         raise exception.ConsumerNotFound(uuid=uuid)
     rec = result[0]
     cs = db.pythonize(rec["cs"])
-    pj = db.pythonize(rec["pj"])
-    user = db.pythonize(rec["u"])
+    pj = rec["pj"]
+    pj = db.pythonize(pj) if pj else None
+    user = rec["u"]
+    user = db.pythonize(user) if user else None
     return {"uuid": cs.uuid,
-            "project_uuid": pj.uuid,
-            "user_uuid": user.uuid,
-            "generation": cs.generation,
-            "updated_at": cs.updated_at,
-            "created_at": cs.created_at,
+            "project_uuid": pj,
+            "user_uuid": user,
+            "generation": cs.get("generation"),
+            "updated_at": cs.get("updated_at"),
+            "created_at": cs.get("created_at"),
     }
 
 
@@ -114,10 +113,9 @@ def _delete_consumer(ctx, consumer):
 
 class Consumer(object):
 
-    def __init__(self, context, id=None, uuid=None, project=None, user=None,
+    def __init__(self, context, uuid=None, project=None, user=None,
                  generation=None, updated_at=None, created_at=None):
         self._context = context
-        self.id = id
         self.uuid = uuid
         self.project = project
         self.user = user
@@ -144,13 +142,15 @@ class Consumer(object):
 
     def create(self):
         @db_api.placement_context_manager.writer
-        def _create_in_db(ctx):
+        def _create_in_db(ctx, gen):
             query = """
-                    MERGE (cs:CONSUMER {uuid: '%s', generation: 0})
+                    MERGE (cs:CONSUMER {uuid: '%s', generation: %s})
                     RETURN cs
-            """ % self.uuid
+            """ % (self.uuid, gen)
             db.execute(query)
-        _create_in_db(self._context)
+        gen = self.generation or 0
+        _create_in_db(self._context, gen)
+        self.generation = gen
 
     def update(self):
         """Used to update the consumer's project and user information without
@@ -160,16 +160,25 @@ class Consumer(object):
         """
         @db_api.placement_context_manager.writer
         def _update_in_db(ctx):
-            query = """
-                    MATCH p=(u:USER)-[:OWNS]-(cs:CONSUMER {uuid: '%s',
-                        generation: %s})
-                    WITH cs, relationships(p)[0] AS owns
-                    DELETE owns
-                    WITH cs
-                    MATCH (u:USER {uuid: '%s'})
-                    WITH u, cs
-                    CREATE (u)-[:OWNS]->(cs)
-            """ % (self.uuid, self.generation, self.user_uuid)
+            user_uuid = self.user.uuid if self.user else None
+            if user_uuid:
+                query = """
+                        MATCH p=(u:USER)-[:OWNS]-(cs:CONSUMER {uuid: '%s',
+                            generation: %s})
+                        WITH cs, relationships(p)[0] AS owns
+                        DELETE owns
+                        WITH cs
+                        OPTIONAL MATCH (u:USER {uuid: '%s'})
+                        WITH u, cs
+                        CREATE (u)-[:OWNS]->(cs)
+                """ % (self.uuid, self.generation, user_uuid)
+            else:
+                query = """
+                        MATCH p=(u:USER)-[:OWNS]-(cs:CONSUMER {uuid: '%s',
+                            generation: %s})
+                        WITH cs, relationships(p)[0] AS owns
+                        DELETE owns
+                """ % (self.uuid, self.generation, user_uuid)
             db.execute(query)
         _update_in_db(self._context)
 

@@ -135,7 +135,7 @@ class TestEnsureConsumer(testtools.TestCase):
 
     def test_no_existing_project_user_consumer_use_incomplete(self):
         """Verify that if the project_id arg is None, that we fall back to the
-        CONF options for incomplete project and user ID.
+        CONF options for incomplete project and user UUID.
         """
         self.mock_project_get.side_effect = exception.NotFound
         self.mock_user_get.side_effect = exception.NotFound
@@ -161,9 +161,9 @@ class TestEnsureConsumer(testtools.TestCase):
         those found objects in creating the consumer. Do not require a consumer
         generation before the appropriate microversion.
         """
-        proj = project_obj.Project(self.ctx, id=1, external_id=self.project_id)
+        proj = project_obj.Project(self.ctx, uuid=self.project_id)
         self.mock_project_get.return_value = proj
-        user = user_obj.User(self.ctx, id=1, external_id=self.user_id)
+        user = user_obj.User(self.ctx, uuid=self.user_id)
         self.mock_user_get.return_value = user
         self.mock_consumer_get.side_effect = exception.NotFound
 
@@ -181,12 +181,12 @@ class TestEnsureConsumer(testtools.TestCase):
         appropriate microversion and that when the consumer already exists,
         then we ensure a matching generation is supplied
         """
-        proj = project_obj.Project(self.ctx, id=1, external_id=self.project_id)
+        proj = project_obj.Project(self.ctx, uuid=self.project_id)
         self.mock_project_get.return_value = proj
-        user = user_obj.User(self.ctx, id=1, external_id=self.user_id)
+        user = user_obj.User(self.ctx, uuid=self.user_id)
         self.mock_user_get.return_value = user
         consumer = consumer_obj.Consumer(
-            self.ctx, id=1, project=proj, user=user, generation=2)
+            self.ctx, project=proj, user=user, generation=2)
         self.mock_consumer_get.return_value = consumer
 
         consumer_gen = 2  # should NOT be ignored (and 2 is expected)
@@ -204,12 +204,12 @@ class TestEnsureConsumer(testtools.TestCase):
         then we raise a 400 when there is a mismatch on the existing
         generation.
         """
-        proj = project_obj.Project(self.ctx, id=1, external_id=self.project_id)
+        proj = project_obj.Project(self.ctx, uuid=self.project_id)
         self.mock_project_get.return_value = proj
-        user = user_obj.User(self.ctx, id=1, external_id=self.user_id)
+        user = user_obj.User(self.ctx, uuid=self.user_id)
         self.mock_user_get.return_value = user
         consumer = consumer_obj.Consumer(
-            self.ctx, id=1, project=proj, user=user, generation=42)
+            self.ctx, project=proj, user=user, generation=42)
         self.mock_consumer_get.return_value = consumer
 
         consumer_gen = 2  # should NOT be ignored (and 2 is NOT expected)

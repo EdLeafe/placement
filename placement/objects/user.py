@@ -12,6 +12,7 @@
 
 from oslo_db import exception as db_exc
 
+from placement.db import graph_db as db
 from placement import db_api
 from placement import exception
 

@@ -47,14 +47,17 @@ def _get_current_inventory_resources(ctx, rp):
                 DB connection.
     :param rp: Resource provider to query inventory for.
     """
+    rp_uuid = rp if isinstance(rp, six.string_types) else rp.uuid
     query = """
             MATCH (rp {uuid: '%s'})-[:PROVIDES]->(rc)
-            RETURN labels(rc) as rc_name
-    """ % rp.uuid
-    result = db.execute()
-    return set([rec["rc_name"] for rec in result])
+            RETURN labels(rc)[0] AS rc_name
+    """ % rp_uuid
+    result = db.execute(query)
+    resources = [rec["rc_name"] for rec in result]
+    return set(resources)
 
-def has_allocations(self, rp, rcs=None):
+
+def has_allocations(rp, rcs=None):
     """Returns True if there are any allocations against resources from the
     specified provider. If `rcs` is specified, the check is limited to
     allocations against just the resource classes specified.
@@ -75,28 +78,31 @@ def has_allocations(self, rp, rcs=None):
     return True
 
 
-def get_allocated_inventory(self, rp, rcs=None):
+def get_allocated_inventory(rp, rcs=None):
     """Returns the list of resource classes for any inventory that has
     allocations against it, along with the total amount allocated. If `rcs` is
     specified, the returned list is limited to only those resource classes in
     `rcs` that have allocations.
     """
+    rp_uuid = rp if isinstance(rp, six.string_types) else rp.uuid
     query = """
             MATCH p=(rp:RESOURCE_PROVIDER {uuid: '%s'})-->(inv)<-[:USES]-(cs)
-            WITH relationships(p)[0] AS usages, labels(inv)[0] AS rcname
+            WITH last(relationships(p)) AS usages, labels(inv)[0] AS rcname
             RETURN rcname, sum(usages.amount) AS used
-    """ % rp.uuid
+    """ % rp_uuid
     result = db.execute(query)
     if not result:
         return {}
-    allocs = {rec["rc"]: rec["used"] for rec in result}
+    allocs = {rec["rcname"]: rec["used"] for rec in result}
     if rcs:
-        for rc in set(rcs):
-            allocs.pop(rc, None)
+        rcs = set(rcs)
+        alloc_keys = set(allocs.keys())
+        for alloc_key in alloc_keys - rcs:
+            allocs.pop(alloc_key)
     return allocs
 
 
-def _delete_inventory_from_provider(ctx, rp, to_delete):
+def _delete_inventory_from_provider(ctx, rp, to_delete=None):
     """Deletes any inventory records from the supplied provider and set() of
     resource class identifiers.
 
@@ -106,12 +112,17 @@ def _delete_inventory_from_provider(ctx, rp, to_delete):
     :param ctx: `placement.context.RequestContext` that contains an oslo_db
                 Session
     :param rp: Resource provider from which to delete inventory.
-    :param to_delete: set() containing resource class names to delete.
+    :param to_delete: set() containing resource class names to delete. If
+                      to_delete is None, all inventory will be deleted.
     """
-    allocs = rp.get_allocated_inventory(rcs=to_delete)
+    rp_uuid = rp if isinstance(rp, six.string_types) else rp.uuid
+    allocs = get_allocated_inventory(rp_uuid, rcs=to_delete)
     if allocs:
-        raise exception.InventoryInUse(resource_classes=allocs,
-                                       resource_provider=rp.uuid)
+        alloc_keys = ", ".join(allocs.keys())
+        raise exception.InventoryInUse(resource_classes=alloc_keys,
+                                       resource_provider=rp_uuid)
+    if to_delete is None:
+        to_delete = _get_current_inventory_resources(ctx, rp_uuid)
     for rc in to_delete:
         # Delete the providing relationship first
         query = """
@@ -119,17 +130,18 @@ def _delete_inventory_from_provider(ctx, rp, to_delete):
                 WITH relationships(p)[0] AS rel, rc
                 DELETE rel
                 RETURN id(rc) AS rcid
-        """ % (rp.uuid, rc)
-        result = db.execute()
-        rcid = result[0]["rcid"]
-        # Now delete the inventory
-        query = """
-                MATCH (inv)
-                WHERE id(inv) = %s
-                WITH inv
-                DELETE inv
-        """ % rcid
-        result = db.execute()
+        """ % (rp_uuid, rc)
+        result = db.execute(query)
+        if result:
+            rcid = result[0]["rcid"]
+            # Now delete the inventory
+            query = """
+                    MATCH (inv)
+                    WHERE id(inv) = %s
+                    WITH inv
+                    DELETE inv
+            """ % rcid
+            result = db.execute(query)
     return len(to_delete)
 
 
@@ -152,7 +164,7 @@ def _add_inventory_to_provider(ctx, rp, inv_list):
                 "step_size: %s" % inv_rec.step_size,
                 ]
         rc_att_str = ", ".join(rc_atts)
-        inv_adds.append("CREATE (rp)-[:PROVIDES]-(:%s {%s})" %
+        inv_adds.append("CREATE (rp)-[:PROVIDES]->(:%s {%s})" %
                 (rc_name, rc_att_str))
     creates = "\n".join(inv_adds)
     query = """
@@ -196,7 +208,7 @@ def _update_inventory_for_provider(ctx, rp, inv_list, to_update):
         upds = []
         for att in ("total", "reserved", "min_unit", "max_unit", "step_size",
                 "allocation_ratio"):
-            upds.append("%s=%s" % (att, getattr(inv_record, att)))
+            upds.append("rc.%s=%s" % (att, getattr(inv_record, att)))
         update_clause = ", ".join(upds)
         # Updated the inventory of the RC node
         query = """
@@ -204,7 +216,7 @@ def _update_inventory_for_provider(ctx, rp, inv_list, to_update):
                 WHERE id(rc) = %s
                 SET %s
                 RETURN rc
-        """ % (rcid, upd_clause)
+        """ % (rcid, update_clause)
         result = db.execute(query)
     return exceeded
 
@@ -288,7 +300,8 @@ def _set_inventory(context, rp, inv_list):
     if to_delete:
         _delete_inventory_from_provider(context, rp, to_delete)
     if to_add:
-        _add_inventory_to_provider(context, rp, to_add)
+        inv_to_add = [inv for inv in inv_list if inv.resource_class in to_add]
+        _add_inventory_to_provider(context, rp, inv_to_add)
     if to_update:
         exceeded = _update_inventory_for_provider(context, rp, inv_list,
                                                   to_update)
@@ -321,14 +334,14 @@ def _get_provider_by_uuid(context, uuid):
     result = db.execute(query)
     if not result:
         raise exception.NotFound(
-            "No resource provider with uuid %s found" % uuid)
+                "No resource provider with uuid %s found" % uuid)
     rp = db.pythonize(result[0]["rp"])
-    provider_ids = provider_uuids_from_uuid(uuid)
+    provider_ids = provider_uuids_from_uuid(context, uuid)
     return {"uuid": rp.uuid,
             "name": rp.name,
             "generation": rp.generation,
-            "root_provider_uuid": provider_ids.root_provider_uuid,
-            "parent_provider_uuid": provider_ids.parent_provider_uuid,
+            "root_provider_uuid": provider_ids.root_uuid,
+            "parent_provider_uuid": provider_ids.parent_uuid,
             "updated_at": rp.updated_at,
             "created_at": rp.created_at,
     }
@@ -358,7 +371,7 @@ def anchors_for_sharing_providers(context, rp_uuids):
     returned.
     """
     query = """
-            MATCH (anchor:RESOURCE_PROVIDER)-[*]->()-[:ASSOCIATED]->
+            MATCH (anchor:RESOURCE_PROVIDER)-[*0..99]->()-[:ASSOCIATED]->
                 (shared:RESOURCE_PROVIDER)
             WHERE shared.uuid in %s
             RETURN shared.uuid as s_uuid, anchor.uuid AS a_uuid 
@@ -380,6 +393,23 @@ def _ensure_aggregate(ctx, agg_uuid):
     return agg_uuid
 
 
+def associate(context, resource_provider, rp_uuids):
+    """Associates one or more resource providers with the specified resource
+    provider. Note that the relationship is from RP to shared entity, as this
+    is needed for resolving :PROVIDES relationships; e.g.:
+        (rp)-[:ASSOCIATED]->(share)-[:PROVIDES]->(resource)
+    """
+    query = """
+            MATCH (share:RESOURCE_PROVIDER {uuid: '%s'})
+            WITH share
+            MATCH (rp:RESOURCE_PROVIDER)
+            WHERE rp.uuid IN %s
+            WITH share, rp
+            MERGE (rp)-[:ASSOCIATED]->(share)
+            RETURN share
+    """ % (resource_provider.uuid, rp_uuids)
+    result = db.execute(query)
+
 @db_api.placement_context_manager.writer
 def _set_aggregates(context, resource_provider, provided_aggregates,
                     increment_generation=False):
@@ -394,36 +424,39 @@ def _set_aggregates(context, resource_provider, provided_aggregates,
     provided_aggregates = set(provided_aggregates)
     existing_aggregates = _get_aggregates_by_provider(context,
             resource_provider)
-    agg_uuids_to_add = provided_aggregates - set(existing_aggregates)
     # A list of aggregate UUIDs that will be associated with the provider
-    aggs_to_associate = []
+    aggs_to_associate = provided_aggregates - set(existing_aggregates)
     # Same list for those aggregates to remove the association with this
     # provider
     aggs_to_disassociate = [agg_uuid for agg_uuid in existing_aggregates
             if agg_uuid not in provided_aggregates]
 
-    stmnt = "MERGE (rp)-[:ASSOCIATED]->(agg:AGGREGATE {uuid: '%s'})"
-    creates = [stmnt % agg_uuid for agg_uuid in agg_uuids_to_add]
-    create_clause = "\n".join(creates)
-    query = """
-            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
-            WITH rp
-            %s
-            RETURN rp
-    """ % (resource_provider.uuid, create_clause)
-    result = db.execute(query)
+    if aggs_to_associate:
+        stmnt = "MERGE (rp)-[:ASSOCIATED]->(agg%s:AGGREGATE {uuid: '%s'})"
+        creates = [stmnt % (num, agg_uuid)
+                for num, agg_uuid in enumerate(aggs_to_associate)]
+        create_clause = "\n".join(creates)
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
+                WITH rp
+                %s
+                RETURN rp
+        """ % (resource_provider.uuid, create_clause)
+        result = db.execute(query)
 
-    # Delete the agg relationships no longer needed
-    query = """
-            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[a:ASSOCIATED]->(agg:AGGREGATE)
-            WITH rp, a, agg
-            WHERE agg.uuid in %s
-            DELETE a
-    """ % (resource_provider.uuid, aggs_to_disassociate)
-    result = db.execute(query)
-    if increment_generation:
-        resource_provider.increment_generation()
-    return
+    if aggs_to_disassociate:
+        # Delete the agg relationships no longer needed
+        query = """
+                MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[a:ASSOCIATED]->
+                    (agg:AGGREGATE)
+                WITH rp, a, agg
+                WHERE agg.uuid in %s
+                DELETE a
+        """ % (resource_provider.uuid, aggs_to_disassociate)
+        result = db.execute(query)
+        if increment_generation:
+            resource_provider.increment_generation()
+        return
 
 
 @db_api.placement_context_manager.writer
@@ -480,14 +513,14 @@ def _set_traits(context, rp, traits):
 
 
 @db_api.placement_context_manager.reader
-def _has_child_providers(context, rp_id):
+def _has_child_providers(context, rp_uuid):
     """Returns True if the supplied resource provider has any child providers,
     False otherwise
     """
     query = """
-            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[:CONTAINS]-(child)
+            MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[:CONTAINS]->(child)
             RETURN count(child) AS num
-    """
+    """ % rp_uuid
     result = db.execute(query)
     return bool(result[0]["num"])
 
@@ -544,7 +577,7 @@ def provider_uuids_from_rp_uuids(context, rp_uuids):
             RETURN uuid, parent_uuid, root_uuid
     """ % rp_uuids
     result = db.execute(query)
-    return [ProviderIds(**rec) for rec in result]
+    return {rec["uuid"]: ProviderIds(**rec) for rec in result}
 
 
 def provider_uuids_from_uuid(context, uuid):
@@ -557,7 +590,7 @@ def provider_uuids_from_uuid(context, uuid):
               ResourceProvider with a matching uuid.
     :param uuid: The UUID of the provider to look up
     """
-    return provider_uuids_from_rp_uuids([uuid])[0]
+    return provider_uuids_from_rp_uuids(context, [uuid]).get(uuid)
 
 
 def provider_ids_matching_aggregates(context, member_of, rp_uuids=None):
@@ -592,7 +625,7 @@ def provider_ids_matching_aggregates(context, member_of, rp_uuids=None):
             {rp_clause}
             {agg_clause}
             RETURN rp.uuid AS rp_uuid
-    """.format({"rp_clause": rp_clause, "agg_clause": agg_clause})
+    """.format(rp_clause=rp_clause, agg_clause=agg_clause)
     result = db.execute(query)
     return set([rec["rp_uuid"] for rec in result])
 
@@ -607,6 +640,9 @@ class ResourceProvider(object):
         self.uuid = uuid
         self.name = name
         self.generation = generation
+        self.updated_at = updated_at
+        self.created_at = created_at
+
         # UUID of the root provider in a hierarchy of providers. Will be equal
         # to the uuid field if this provider is the root provider of a
         # hierarchy. This field is never manually set by the user. Instead, it
@@ -615,14 +651,12 @@ class ResourceProvider(object):
         # is an optimization field that allows us to very quickly query for all
         # providers within a particular tree without doing any recursive
         # querying.
+        # NOTE(edleafe): Neither of the following two fields are used in a
+        # graph DB, and will be removed.
         self.root_provider_uuid = root_provider_uuid
         # UUID of the direct parent provider, or None if this provider is a
         # "root" provider.
         self.parent_provider_uuid = parent_provider_uuid
-        # NOTE(edleafe): Neither of the above fields are used in a graph DB,
-        # and will be removed.
-        self.updated_at = updated_at
-        self.created_at = created_at
 
     def create(self):
         if self.uuid is None:
@@ -651,7 +685,7 @@ class ResourceProvider(object):
             'name': self.name,
             'parent_provider_uuid': self.parent_provider_uuid,
         }
-        self._update_in_db(updates)
+        self._update_in_db(self._context, updates)
 
     @classmethod
     def get_by_uuid(cls, context, uuid):
@@ -747,14 +781,20 @@ class ResourceProvider(object):
         # User supplied a parent, let's make sure it exists
         parent_uuid = updates.pop('parent_provider_uuid')
         parent_create_clause = ""
-        if parent_uuid is not None:
+        atts = ["uuid: '%s'" % self.uuid, "name: '%s'" % self.name,
+                "generation: 0", "created_at: timestamp()",
+                "updated_at: timestamp()"]
+        if parent_uuid is None:
+            atts.append("root_provider_uuid: '%s'" % self.uuid)
+            root_uuid = self.uuid
+        else:
             # Setting parent to ourselves doesn't make any sense
             if parent_uuid == self.uuid:
                 raise exception.ObjectActionError(
-                    action='create',
-                    reason='parent provider UUID cannot be same as UUID. '
-                           'Please set parent provider UUID to None if '
-                           'there is no parent.')
+                    action="create",
+                    reason="parent provider UUID cannot be same as UUID. "
+                           "Please set parent provider UUID to None if "
+                           "there is no parent.")
 
             # Verify that the parent exists
             query = """
@@ -766,22 +806,29 @@ class ResourceProvider(object):
                 raise exception.ObjectActionError(
                     action='create',
                     reason='parent provider UUID does not exist.')
+            atts.append("parent_provider_uuid: '%s'" % parent_uuid)
+            root_uuid = db.get_root_node(parent_uuid)
+            atts.append("root_provider_uuid: '%s'" % root_uuid)
             parent_create_clause = """
                     WITH rp
                     MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
                     WITH rp, parent
-                    CREATE (parent)-[:CONTAINS]->(rp)
-                    """
+                    MERGE (parent)-[:CONTAINS]->(rp)
+                    """ % parent_uuid
         # Create the RP, and if there is a parent, create the relationship
+        att_clause = ", ".join(atts)
         query = """
-                CREATE (rp:RESOURCE_PROVIDER {uuid: '%s', generation: 0,
-                    created_at: timestamp(), updated_at: timestamp()})
+                CREATE (rp:RESOURCE_PROVIDER {%s})
                 %s
                 RETURN rp
-                """ % (uuid, parent_create_clause)
+                """ % (att_clause, parent_create_clause)
         result = db.execute(query)
-        rp = db.pythonize(result[0]["p"])
-        self.generation = rp.generation
+        rp_db = db.pythonize(result[0]["rp"])
+        self.generation = rp_db.generation
+        self.created_at = rp_db.created_at
+        self.updated_at = rp_db.updated_at
+        self.parent_provider_uuid = parent_uuid
+        self.root_provider_uuid = root_uuid
 
     @staticmethod
     @db_api.placement_context_manager.writer
@@ -791,14 +838,24 @@ class ResourceProvider(object):
         # resource_providers.parent_provider_id will prevent deletion of the
         # parent within the transaction below. This is just a quick
         # short-circuit outside of the transaction boundary.
-        if _has_child_providers(context, _id):
+        if _has_child_providers(context, uuid):
             raise exception.CannotDeleteParentResourceProvider()
 
         # Delete any inventory associated with the resource provider. This will
         # fail if the inventory has any allocations against it.
+        _delete_inventory_from_provider(context, uuid)
         query = """
-                MATCH (me:RESOURCE_PROVIDER {uuid: '%s')-[:PROVIDES]->(inv)
-                WITH me, inv
+                MATCH p=(me:RESOURCE_PROVIDER {uuid: '%s'})-[:PROVIDES]->(inv)
+                WITH me, inv, last(relationships(p)) AS provisions
+                DELETE provisions
+                """ % uuid
+        try:
+            result = db.execute(query)
+        except db.ClientError:
+            raise exception.ResourceProviderInUse()
+        query = """
+                MATCH (me:RESOURCE_PROVIDER {uuid: '%s'})-[:PROVIDES]->(inv)
+                WITH inv
                 DELETE inv
                 """ % uuid
         try:
@@ -814,10 +871,9 @@ class ResourceProvider(object):
         result = db.execute(query)
 
     @db_api.placement_context_manager.writer
-    def _update_in_db(self, updates):
+    def _update_in_db(self, context, updates):
         # A list of resource providers in the same tree with the
         # resource provider to update
-        context = self._context
         same_tree = []
         if 'parent_provider_uuid' in updates:
             # TODO(jaypipes): For now, "re-parenting" and "un-parenting" are
@@ -832,6 +888,7 @@ class ResourceProvider(object):
             # So, for now, let's just prevent re-parenting...
             my_ids = provider_uuids_from_uuid(context, self.uuid)
             parent_uuid = updates.pop('parent_provider_uuid')
+            curr_parent_uuid = my_ids.parent_uuid
             if parent_uuid is not None:
                 # Get the current parent and the node with the new parent_uuid
                 query = """
@@ -839,7 +896,7 @@ class ResourceProvider(object):
                         OPTIONAL MATCH (curr:RESOURCE_PROVIDER)-[:CONTAINS]->
                             (:RESOURCE_PROVIDER {uuid: '%s'})
                         RETURN new.uuid as new_uuid, curr.uuid as curr_uuid
-                        """ % (parent_uuid, self.uuid)
+                        """ % (parent_uuid, self.parent_provider_uuid)
                 result = db.execute(query)
                 rec = result[0]
                 curr_parent_uuid = result[0]["curr_uuid"]
@@ -848,11 +905,6 @@ class ResourceProvider(object):
                     raise exception.ObjectActionError(
                         action='create',
                         reason='parent provider UUID does not exist.')
-                if curr_parent_uuid != parent_provider_uuid:
-                    raise exception.ObjectActionError(
-                        action='update',
-                        reason='re-parenting a provider is not currently '
-                               'allowed.')
                 if curr_parent_uuid is None:
                     # We can set the parent relationship, but first we need to
                     # check that this parent isn't already related to this
@@ -872,20 +924,27 @@ class ResourceProvider(object):
                             // Get this node
                             MATCH (rp:RESOURCE_PROVIDER {uuid:'%s'})
                             RETURN rp
-                            """ (self.uuid, self.uuid, self.uuid)
+                            """ % (self.uuid, self.uuid, self.uuid)
                     result = db.execute(query)
                     tree_uuids = [rec["rp"]["uuid"] for rec in result]
                     if parent_uuid in tree_uuids:
                         raise exception.ObjectActionError(
-                            action='update',
-                            reason='creating loop in the provider tree is '
-                                   'not allowed.')
+                            action="update",
+                            reason="creating loop in the provider tree is "
+                                   "not allowed.")
+                else:
+                    if curr_parent_uuid != parent_uuid:
+                        raise exception.ObjectActionError(
+                            action="update",
+                            reason="re-parenting a provider is not currently "
+                                   "allowed.")
                 # Everything checks out; set the parent relationship
                 query = """
                         MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
-                        WITH parent
-                        CREATE (parent)-[:CONTAINS]->
-                            (me:RESOURCE_PROVIDER uuid: '%s')
+                        MATCH (me:RESOURCE_PROVIDER {uuid: '%s'})
+                        WITH parent, me
+                        CREATE (parent)-[:CONTAINS]->(me)
+                        RETURN parent
                         """ % (parent_uuid, self.uuid)
                 result = db.execute(query)
 
@@ -895,6 +954,7 @@ class ResourceProvider(object):
                 query = """
                         MATCH (parent:RESOURCE_PROVIDER)-[:CONTAINS]->
                             (:RESOURCE_PROVIDER {uuid: '%s'})
+                        RETURN parent
                         """ % self.uuid
                 result = db.execute(query)
                 if result:
@@ -903,8 +963,15 @@ class ResourceProvider(object):
                         reason='un-parenting a provider is not currently '
                                'allowed.')
 
-        update_text = ["%s = %s" % (k, v) for k, v in updates.items()]
-        update_clause = ", ".join(update_text)
+        update_lines = []
+        for key, val in updates.items():
+            if isinstance(val, six.string_types):
+                txt = "rp.%s = '%s'" % (key, val)
+            else:
+                txt = "rp.%s = %s" % (key, val)
+            update_lines.append(txt)
+        ### Need to add updates when the parent changes to update both the parent and the root
+        update_clause = ", ".join(update_lines)
         query = """
                 MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
                 WITH rp
@@ -923,25 +990,18 @@ class ResourceProvider(object):
         return resource_provider
 
 
-##### WORK
 @db_api.placement_context_manager.reader
-def get_providers_with_shared_capacity(ctx, rc_id, amount, member_of=None):
-    """Returns a list of resource provider IDs (internal IDs, not UUIDs)
-    that have capacity for a requested amount of a resource and indicate that
-    they share resource via an aggregate association.
-
-    Shared resource providers are marked with a standard trait called
-    MISC_SHARES_VIA_AGGREGATE. This indicates that the provider allows its
-    inventory to be consumed by other resource providers associated via an
-    aggregate link.
+def get_providers_with_shared_capacity(ctx, rc_name, amount, member_of=None):
+    """Returns a list of resource provider UUIDs that have capacity for a
+    requested amount of a resource and indicate that they share resource via an
+    aggregate association.
 
     For example, assume we have two compute nodes, CN_1 and CN_2, each with
     inventory of VCPU and MEMORY_MB but not DISK_GB (in other words, these are
     compute nodes with no local disk). There is a resource provider called
-    "NFS_SHARE" that has an inventory of DISK_GB and has the
-    MISC_SHARES_VIA_AGGREGATE trait. Both the "CN_1" and "CN_2" compute node
-    resource providers and the "NFS_SHARE" resource provider are associated
-    with an aggregate called "AGG_1".
+    "NFS_SHARE" that has an inventory of DISK_GB. Both the "CN_1" and "CN_2"
+    compute node resource providers are related to the "NFS_SHARE" resource
+    provider with an [:ASSOCIATED] relationship.
 
     The scheduler needs to determine the resource providers that can fulfill a
     request for 2 VCPU, 1024 MEMORY_MB and 100 DISK_GB.
@@ -962,7 +1022,7 @@ def get_providers_with_shared_capacity(ctx, rc_id, amount, member_of=None):
     get_providers_with_shared_capacity(ctx, "DISK_GB", 100), we would want to
     get back the ID for the NFS_SHARE resource provider.
 
-    :param rc_id: Internal ID of the requested resource class.
+    :param rc_name: Name of the requested resource class.
     :param amount: Amount of the requested resource.
     :param member_of: When present, contains a list of lists of aggregate
                       uuids that are used to filter the returned list of
@@ -970,17 +1030,18 @@ def get_providers_with_shared_capacity(ctx, rc_id, amount, member_of=None):
                       aggregates referenced.
     """
     query = """
-            MATCH ()-[:ASSOCIATES]->(rp:RESOURCE_PROVIDER)
+            MATCH ()-[:ASSOCIATED]->(rp:RESOURCE_PROVIDER)
             WITH rp
             MATCH (rp)-[:PROVIDES]->(rc:%s)
             WITH rp, rc
             OPTIONAL MATCH p=(cs:CONSUMER)-[:USES]->(rc)
             WITH rp, rc, relationships(p)[0] AS usages
-            WITH rp, rc, sum(usages.amount) AS total_used
+            WITH rp, rc, sum(usages.amount) AS total_used,
+                ((rc.total - rc.reserved) * rc.allocation_ratio) AS capacity
             MATCH (rc)
-            WHERE rc.total - total_used >= %s
+            WHERE capacity -  total_used >= %s
             RETURN rp.uuid AS rp_uuid
-    """
+    """ % (rc_name, amount)
     result = db.execute(query)
     return [rec["rp_uuid"] for rec in result]
 
@@ -1028,35 +1089,32 @@ def _get_all_by_filters_from_db(context, filters):
         rp_prop_str = " {%s}" % ", ".join(rp_props)
     else:
         rp_prop_str = ""
-    rp_str ="rp%s" % rp_prop_str
-    rsrc_query_tmplt = "MATCH (%s)-[:PROVIDES]->(%s)"
+    rp_str ="rp:RESOURCE_PROVIDER%s" % rp_prop_str
 
     # Build the query line-by-line, incorporating all the filters
     query_lines = []
     if in_tree:
         tree_query = """
-                MATCH (root:RESOURCE_PROVIDER)-[*0..99]->
+                MATCH (root:RESOURCE_PROVIDER)-[:CONTAINS*0..99]->
                     (tree:RESOURCE_PROVIDER {uuid: '%s'})
                 OPTIONAL MATCH r=()-->(root)
                 WITH root, relationships(r) AS rootrel
                 WHERE rootrel IS null
-                MATCH (root)-[*]->(%s)
+                MATCH (root)-[:CONTAINS*0..99]->(%s)
                 WITH rp
         """ % (in_tree, rp_str)
         query_lines.append(tree_query)
     else:
-        query_lines.append("MATCH %s") % rp_str
+        query_lines.append("MATCH (%s)" % rp_str)
         query_lines.append("WITH rp")
 
     if resources:
-        rps_with_rsrcs = {rsrc_nm: get_providers_with_resource(context,
-                rsrc_nm, amount)
-                for rsrc_nm, amount in resources.items()}
-        # Get the intersection of the root providers that can provide all the
-        # resources.
-        rsrc_sets = [set(rp[0]) for rp in rps_with_rsrcs.values()]
-        good_rps = rsrc_sets[0]
-        for rsrc_set in rsrc_sets[1:]:
+        rps_with_rsrcs = []
+        for rc_name, amount in resources.items():
+            rps = get_providers_with_resource(context, rc_name, amount)
+            rps_with_rsrcs.append(set([rp[0] for rp in rps]))
+        good_rps = rps_with_rsrcs[0]
+        for rsrc_set in rps_with_rsrcs[1:]:
             good_rps.intersection_update(rsrc_set)
         # Now create the query lines to limit RPs to just those with sufficient
         # resources.
@@ -1064,17 +1122,21 @@ def _get_all_by_filters_from_db(context, filters):
         query_lines.append("WITH rp")
 
     if member_of:
-        query_lines.append("WHERE rp.uuid IN %s" % member_of)
+        for agg in member_of:
+            query_lines.append("MATCH (rp)-[:ASSOCIATED]->(agg)")
+            query_lines.append("WHERE agg.uuid IN %s" % agg)
         query_lines.append("WITH rp")
     if forbidden_aggs:
-        query_lines.append("WHERE NOT rp.uuid IN %s" % member_of)
+        for agg in forbidden_aggs:
+            query_lines.append("MATCH (rp)-[:ASSOCIATED]->(agg)")
+            query_lines.append("WHERE agg.uuid NOT IN %s" % agg)
         query_lines.append("WITH rp")
 
     trait_filters = []
     for trait in required:
-        trait_filters.append("EXISTS rp.%" % trait)
+        trait_filters.append("EXISTS rp.%s" % trait)
     for trait in forbidden:
-        trait_filters.append("NOT EXISTS rp.%" % trait)
+        trait_filters.append("NOT EXISTS rp.%s" % trait)
     trait_str = " AND ".join(trait_filters)
     if trait_str:
         query_lines.append("WHERE %s" % trait_str)
@@ -1111,7 +1173,7 @@ def get_all_by_filters(context, filters=None):
 def _filter_rps_by_traits(ctx, traits, any_or_all):
     if not traits:
         raise ValueError("traits must not be empty")
-    trait_str = " OR ".join(["EXISTS rp.%s" % trait for trait in traits])
+    trait_str = " OR ".join(["EXISTS(rp.%s)" % trait for trait in traits])
     query = """
         MATCH (rp)
         WHERE %s
@@ -1146,7 +1208,7 @@ def _get_provider_ids_having_all_traits(ctx, required_traits):
                             which each provider must have associated with it.
     :raise ValueError: If required_traits is empty or None.
     """
-    return _filter_rps_by_traits(ctx, traits, "all")
+    return _filter_rps_by_traits(ctx, required_traits, "all")
 
 
 @db_api.placement_context_manager.reader
@@ -1229,7 +1291,7 @@ def get_provider_ids_for_traits_and_aggs(ctx, required_traits,
 
 
 @db_api.placement_context_manager.reader
-def get_provider_ids_matching(ctx, resources, required_traits,
+def get_provider_uuids_matching(ctx, resources, required_traits,
                               forbidden_traits, member_of, forbidden_aggs,
                               tree_root_uuid):
     """Returns a list of tuples of (provider UUID, root provider UUID)
@@ -1331,7 +1393,7 @@ def get_providers_with_resource(ctx, rc_name, amount, tree_root_uuid=None):
                 (rp:RESOURCE_PROVIDER)-[:PROVIDES]->(rc:{rc_name})
             WITH root, rp, rc, ((rc.total - rc.reserved) * rc.allocation_ratio)
                 AS capacity
-            OPTIONAL MATCH par=(parent:RESOURCE_PROVIDER)-[*]->(root)
+            OPTIONAL MATCH par=(parent:RESOURCE_PROVIDER)-[:CONTAINS*]->(root)
             WITH root, size(relationships(par)) AS numrel, rp, rc, capacity
             OPTIONAL MATCH p=(:CONSUMER)-[:USES]->(rc)
             WITH root, numrel, rp, rc, capacity, last(relationships(p)) AS uses
@@ -1341,10 +1403,10 @@ def get_providers_with_resource(ctx, rc_name, amount, tree_root_uuid=None):
             AND rc.max_unit >= {amount}
             AND {amount} % rc.step_size = 0
             AND numrel IS null
-            RETURN rp, root
+            RETURN rp.uuid AS rp_uuid, root.uuid AS root_uuid
     """.format(rt=tree_root_clause, rc_name=rc_name, amount=amount)
     result = db.execute(query)
-    return set((rec["rp"], rec["root"]) for rec in result)
+    return set((rec["rp_uuid"], rec["root_uuid"]) for rec in result)
 
 
 @db_api.placement_context_manager.reader
@@ -1546,3 +1608,15 @@ def get_trees_matching_all(ctx, resources, required_traits, forbidden_traits,
               list(required_traits), list(forbidden_traits))
 
     return provs_with_inv
+
+
+def is_nested(rp1_uuid, rp2_uuid):
+    """Returns True if the two resource providers are related with a :CONTAINS
+    relationship. The direction of the relationship doesn't matter.
+    """
+    query = """
+            MATCH p=(rp1 {uuid: '%s'})-[:CONTAINS*]-(rp2 {uuid: '%s'})
+            RETURN p
+    """ % (rp1_uuid, rp2_uuid)
+    result = db.execute(query)
+    return bool(result)

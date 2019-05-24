@@ -16,6 +16,7 @@ from oslo_utils.fixture import uuidsentinel
 
 from placement.cmd import status
 from placement import conf
+from placement.db import graph_db as db
 from placement import db_api
 from placement.objects import consumer
 from placement.objects import resource_provider
@@ -34,36 +35,17 @@ class UpgradeCheckIncompleteConsumersTestCase(
         conf.register_opts(config)
         self.checks = status.Checks(config)
 
-    def test_check_incomplete_consumers(self):
-        # Create some allocations with 3 missing consumers.
-        self._create_incomplete_allocations(
-            self.context, num_of_consumer_allocs=2)
-        result = self.checks._check_incomplete_consumers()
-        # Since there are incomplete consumers, there should be a warning.
-        self.assertEqual(upgradecheck.Code.WARNING, result.code)
-        # Check the details for the consumer count.
-        self.assertIn('There are 3 incomplete consumers table records for '
-                      'existing allocations', result.details)
-        # Run the online data migration (as recommended from the check output).
-        consumer.create_incomplete_consumers(self.context, batch_size=50)
-        # Run the check again and it should be successful.
-        result = self.checks._check_incomplete_consumers()
-        self.assertEqual(upgradecheck.Code.SUCCESS, result.code)
-
     def test_check_root_provider_ids(self):
 
         @db_api.placement_context_manager.writer
         def _create_old_rp(ctx):
-            rp_tbl = resource_provider._RP_TBL
-            ins_stmt1 = rp_tbl.insert().values(
-                id=1,
-                uuid=uuidsentinel.rp1,
-                name='rp-1',
-                root_provider_id=None,
-                parent_provider_id=None,
-                generation=42,
-            )
-            ctx.session.execute(ins_stmt1)
+            query = """
+                    CREATE (rp:RESOURCE_PROVIDER {name: 'rp-1', uuid: '%s',
+                        generation: 42, created_at: timestamp(), updated_at:
+                        timestamp()})
+                    RETURN rp
+            """ % uuidsentinel.rp1
+            result = db.execute(query)
 
         # Create a resource provider with no root provider id.
         _create_old_rp(self.context)
