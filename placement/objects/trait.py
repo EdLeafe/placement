@@ -126,6 +126,7 @@ class Trait(object):
         query = """
                 MATCH (rp:RESOURCE_PROVIDER)
                 WHERE exists(rp.%s)
+                RETURN rp
         """ % name
         result = db.execute(query)
         if result:
@@ -202,15 +203,9 @@ def get_traits_by_provider_uuid(context, rp_uuid):
 
 
 def _traits_from_props(context, props):
-    all_traits = Trait.get_all_names(context)
-    trait_names = [prop for prop in props if prop in all_traits]
-    query = """
-            MATCH (trait:TRAIT)
-            WHERE trait.name IN %s
-            RETURN trait
-    """ % trait_names
-    result = db.execute(query)
-    return [db.pythonize(rec["trait"]) for rec in result]
+    all_names = Trait.get_all_names(context)
+    trait_names = [prop for prop in props if prop in all_names]
+    return trait_names
 
 
 @db_api.placement_context_manager.reader

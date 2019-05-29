@@ -17,7 +17,10 @@ import six
 
 from placement import exception
 from placement import lib as placement_lib
+from placement.objects import allocation as alloc_obj
 from placement.objects import allocation_candidate as ac_obj
+from placement.objects import consumer as consumer_obj
+from placement.objects import inventory as inv_obj
 from placement.objects import resource_class as rc_obj
 from placement.objects import resource_provider as rp_obj
 from placement.objects import trait as trait_obj
@@ -141,38 +144,36 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         self.allocate_from_provider(excl_extra_avail, 'CUSTOM_SPECIAL', 99)
 
         resources = {
-            orc.STANDARDS.index(orc.VCPU): 5,
-            orc.STANDARDS.index(orc.MEMORY_MB): 1024,
-            orc.STANDARDS.index(orc.DISK_GB): 1500
+            orc.VCPU: 5,
+            orc.MEMORY_MB: 1024,
+            orc.DISK_GB: 1500
         }
 
         empty_req_traits = {}
         empty_forbidden_traits = {}
         empty_agg = []
         empty_forbidden_aggs = []
-        empty_root_id = None
+        empty_root_uuid = None
 
         # Run it!
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            empty_agg, empty_forbidden_aggs, empty_root_id)
+            empty_agg, empty_forbidden_aggs, empty_root_uuid)
 
         # We should get all the incl_* RPs
         expected = [incl_biginv_noalloc, incl_extra_full]
 
-        self.assertEqual(set((rp.id, rp.id) for rp in expected), set(res))
+        self.assertEqual(set((rp.uuid, rp.uuid) for rp in expected), set(res))
 
         # Now request that the providers must have a set of required traits and
         # that this results in no results returned, since we haven't yet
         # associated any traits with the providers
         avx2_t = trait_obj.Trait.get_by_name(
             self.ctx, os_traits.HW_CPU_X86_AVX2)
-        # get_provider_uuids_matching()'s required_traits and forbidden_traits
-        # arguments maps, keyed by trait name, of the trait internal ID
-        req_traits = {os_traits.HW_CPU_X86_AVX2: avx2_t.id}
-        res = rp_obj.get_provider_uuids_matching(
-            self.ctx, resources, req_traits, empty_forbidden_traits, empty_agg,
-            empty_forbidden_aggs, empty_root_id)
+        req_traits = [avx2_t.name]
+        res = rp_obj.get_provider_uuids_matching(self.ctx, resources,
+                req_traits, empty_forbidden_traits, empty_agg,
+                empty_forbidden_aggs, empty_root_uuid)
 
         self.assertEqual([], res)
 
@@ -181,33 +182,32 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         excl_big_md_noalloc.set_traits([avx2_t])
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, req_traits, empty_forbidden_traits, empty_agg,
-            empty_forbidden_aggs, empty_root_id)
+            empty_forbidden_aggs, empty_root_uuid)
         self.assertEqual([], res)
 
         # OK, now add the trait to one of the incl_* providers and verify that
         # provider now shows up in our results
-        incl_biginv_noalloc.set_traits([avx2_t])
-        res = rp_obj.get_provider_uuids_matching(
-            self.ctx, resources, req_traits, empty_forbidden_traits, empty_agg,
-            empty_forbidden_aggs, empty_root_id)
-
+        incl_biginv_noalloc.set_traits(req_traits)
+        res = rp_obj.get_provider_uuids_matching(self.ctx, resources,
+                req_traits, empty_forbidden_traits, empty_agg,
+                empty_forbidden_aggs, empty_root_uuid)
         rp_uuids = [r[0] for r in res]
-        self.assertEqual([incl_biginv_noalloc.id], rp_uuids)
+        self.assertEqual([incl_biginv_noalloc.uuid], rp_uuids)
 
         # Let's see if the tree_root_uuid filter works
-        root_id = incl_biginv_noalloc.id
+        root_uuid = incl_biginv_noalloc.uuid
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            empty_agg, empty_forbidden_aggs, root_id)
+            empty_agg, empty_forbidden_aggs, root_uuid)
         rp_uuids = [r[0] for r in res]
-        self.assertEqual([incl_biginv_noalloc.id], rp_uuids)
+        self.assertEqual([incl_biginv_noalloc.uuid], rp_uuids)
 
         # We don't get anything if the specified tree doesn't satisfy the
         # requirements in the first place
-        root_id = excl_allused.id
+        root_uuid = excl_allused.uuid
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            empty_agg, empty_forbidden_aggs, root_id)
+            empty_agg, empty_forbidden_aggs, root_uuid)
         self.assertEqual([], res)
 
     def test_get_provider_uuids_matching_with_multiple_forbidden(self):
@@ -222,18 +222,18 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         trait_three, = tb.set_traits(rp3, 'CUSTOM_THREE')
         tb.add_inventory(rp3, orc.VCPU, 64)
 
-        resources = {orc.STANDARDS.index(orc.VCPU): 4}
+        resources = {orc.VCPU: 4}
         empty_req_traits = {}
-        forbidden_traits = {trait_two.name: trait_two.id,
-                            trait_three.name: trait_three.id}
+        forbidden_traits = {trait_two.name: trait_two.uuid,
+                            trait_three.name: trait_three.uuid}
         member_of = [[uuids.agg1]]
         empty_forbidden_aggs = []
-        empty_root_id = None
+        empty_root_uuid = None
 
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, forbidden_traits, member_of,
-            empty_forbidden_aggs, empty_root_id)
-        self.assertEqual({(rp1.id, rp1.id)}, set(res))
+            empty_forbidden_aggs, empty_root_uuid)
+        self.assertEqual({(rp1.uuid, rp1.uuid)}, set(res))
 
     def test_get_provider_uuids_matching_with_aggregates(self):
         rp1 = self._create_provider('rp1', uuids.agg1, uuids.agg2)
@@ -248,27 +248,27 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
         tb.add_inventory(rp4, orc.VCPU, 64)
         tb.add_inventory(rp5, orc.VCPU, 64)
 
-        resources = {orc.STANDARDS.index(orc.VCPU): 4}
+        resources = {orc.VCPU: 4}
         empty_req_traits = {}
         empty_forbidden_traits = {}
         empty_forbidden_aggs = []
-        empty_root_id = None
+        empty_root_uuid = None
 
         member_of = [[uuids.agg1]]
         expected_rp = [rp1, rp4]
 
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            member_of, empty_forbidden_aggs, empty_root_id)
-        self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
+            member_of, empty_forbidden_aggs, empty_root_uuid)
+        self.assertEqual(set((rp.uuid, rp.uuid) for rp in expected_rp), set(res))
 
         member_of = [[uuids.agg1, uuids.agg2]]
         expected_rp = [rp1, rp2, rp4]
 
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            member_of, empty_forbidden_aggs, empty_root_id)
-        self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
+            member_of, empty_forbidden_aggs, empty_root_uuid)
+        self.assertEqual(set((rp.uuid, rp.uuid) for rp in expected_rp), set(res))
 
         member_of = [[uuids.agg1, uuids.agg2],
                      [uuids.agg4]]
@@ -276,8 +276,8 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            member_of, empty_forbidden_aggs, empty_root_id)
-        self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
+            member_of, empty_forbidden_aggs, empty_root_uuid)
+        self.assertEqual(set((rp.uuid, rp.uuid) for rp in expected_rp), set(res))
 
         empty_member_of = []
         forbidden_aggs = [uuids.agg1]
@@ -285,16 +285,16 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            empty_member_of, forbidden_aggs, empty_root_id)
-        self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
+            empty_member_of, forbidden_aggs, empty_root_uuid)
+        self.assertEqual(set((rp.uuid, rp.uuid) for rp in expected_rp), set(res))
 
         forbidden_aggs = [uuids.agg1, uuids.agg2]
         expected_rp = [rp3, rp5]
 
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            empty_member_of, forbidden_aggs, empty_root_id)
-        self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
+            empty_member_of, forbidden_aggs, empty_root_uuid)
+        self.assertEqual(set((rp.uuid, rp.uuid) for rp in expected_rp), set(res))
 
         member_of = [[uuids.agg1, uuids.agg2]]
         forbidden_aggs = [uuids.agg3, uuids.agg4]
@@ -302,8 +302,8 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            member_of, forbidden_aggs, empty_root_id)
-        self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
+            member_of, forbidden_aggs, empty_root_uuid)
+        self.assertEqual(set((rp.uuid, rp.uuid) for rp in expected_rp), set(res))
 
         member_of = [[uuids.agg1]]
         forbidden_aggs = [uuids.agg1]
@@ -311,8 +311,8 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
         res = rp_obj.get_provider_uuids_matching(
             self.ctx, resources, empty_req_traits, empty_forbidden_traits,
-            member_of, forbidden_aggs, empty_root_id)
-        self.assertEqual(set((rp.id, rp.id) for rp in expected_rp), set(res))
+            member_of, forbidden_aggs, empty_root_uuid)
+        self.assertEqual(set((rp.uuid, rp.uuid) for rp in expected_rp), set(res))
 
     def test_get_provider_ids_having_all_traits(self):
         def run(traitnames, expected_ids):
@@ -349,14 +349,14 @@ class ProviderDBHelperTestCase(tb.PlacementDbBaseTestCase):
             rp_obj._get_provider_ids_having_all_traits, self.ctx, {})
 
         # Common trait returns both RPs having it
-        run(['HW_CPU_X86_TBM'], [cn2.id, cn3.id])
+        run(['HW_CPU_X86_TBM'], [cn2.uuid, cn3.uuid])
         # Just the one
-        run(['HW_CPU_X86_TSX'], [cn3.id])
-        run(['HW_CPU_X86_TSX', 'HW_CPU_X86_SGX'], [cn3.id])
-        run(['CUSTOM_FOO'], [cn4.id])
+        run(['HW_CPU_X86_TSX'], [cn3.uuid])
+        run(['HW_CPU_X86_TSX', 'HW_CPU_X86_SGX'], [cn3.uuid])
+        run(['CUSTOM_FOO'], [cn4.uuid])
         # Including the common one still just gets me cn3
-        run(['HW_CPU_X86_TBM', 'HW_CPU_X86_SGX'], [cn3.id])
-        run(['HW_CPU_X86_TBM', 'HW_CPU_X86_TSX', 'HW_CPU_X86_SGX'], [cn3.id])
+        run(['HW_CPU_X86_TBM', 'HW_CPU_X86_SGX'], [cn3.uuid])
+        run(['HW_CPU_X86_TBM', 'HW_CPU_X86_TSX', 'HW_CPU_X86_SGX'], [cn3.uuid])
         # Can't be satisfied
         run(['HW_CPU_X86_TBM', 'HW_CPU_X86_TSX', 'CUSTOM_FOO'], [])
         run(['HW_CPU_X86_TBM', 'HW_CPU_X86_TSX', 'HW_CPU_X86_SGX',
@@ -394,9 +394,9 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
             # NOTE(jaypipes): get_trees_matching_all() expects a dict of
             # resource class internal identifiers, not string names
             resources = {
-                orc.STANDARDS.index(orc.VCPU): 2,
-                orc.STANDARDS.index(orc.MEMORY_MB): 256,
-                orc.STANDARDS.index(orc.SRIOV_NET_VF): 1,
+                orc.VCPU: 2,
+                orc.MEMORY_MB: 256,
+                orc.SRIOV_NET_VF: 1,
             }
             req_traits = kwargs.get('required_traits', {})
             forbid_traits = kwargs.get('forbidden_traits', {})
@@ -589,9 +589,9 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
         geneve_t = trait_obj.Trait.get_by_name(
             self.ctx, os_traits.HW_NIC_OFFLOAD_GENEVE)
-        # required_traits parameter is a dict of trait name to internal ID
+        # required_traits parameter is a dict of trait name to internal uuid
         req_traits = {
-            geneve_t.name: geneve_t.id,
+            geneve_t.name: geneve_t.uuid,
         }
         expected_trees = ['cn3']
         # NOTE(tetsuro): Actually we also get providers without traits here.
@@ -608,21 +608,14 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         # verify that there are no returned allocation candidates
         avx2_t = trait_obj.Trait.get_by_name(
             self.ctx, os_traits.HW_CPU_X86_AVX2)
-        # required_traits parameter is a dict of trait name to internal ID
-        req_traits = {
-            geneve_t.name: geneve_t.id,
-            avx2_t.name: avx2_t.id,
-        }
+        # required_traits parameter is a dict of trait name to UUID
+        req_traits = [geneve_t.name, avx2_t.name]
         _run_test([], [], required_traits=req_traits)
 
         # If we add the AVX2 trait as forbidden, not required, then we
         # should get back the original cn3
-        req_traits = {
-            geneve_t.name: geneve_t.id,
-        }
-        forbidden_traits = {
-            avx2_t.name: avx2_t.id,
-        }
+        req_traits = [geneve_t.name]
+        forbidden_traits = [avx2_t.name]
         expected_trees = ['cn3']
         # NOTE(tetsuro): Actually we also get providers without traits here.
         # This is reported as bug#1771707 and from users' view the bug is now
@@ -697,7 +690,7 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
             name = 'cn' + x + '_pf1'
             pf1 = self._create_provider(name, parent=cn.uuid)
 
-            rp_ids |= set([cn.id, pf0.id, pf1.id])
+            rp_ids |= set([cn.uuid, pf0.uuid, pf1.uuid])
 
             if x == '1':
                 tb.set_traits(cn, os_traits.HW_CPU_X86_AVX2)
@@ -727,10 +720,8 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
             self.ctx, os_traits.HW_NIC_ACCEL_SSL)
 
         # Case1: required on root
-        required_traits = {
-            avx2_t.name: avx2_t.id,
-        }
-        forbidden_traits = {}
+        required_traits = [avx2_t.name]
+        forbidden_traits = []
 
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
@@ -743,12 +734,8 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
         # Case1': required on root with forbidden traits
         # Let's validate that cn3 dissapears
-        required_traits = {
-            avx2_t.name: avx2_t.id,
-        }
-        forbidden_traits = {
-            ssd_t.name: ssd_t.id,
-        }
+        required_traits = [avx2_t.name]
+        forbidden_traits = [ssd_t.name]
 
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
@@ -760,11 +747,8 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case2: multiple required on root
-        required_traits = {
-            avx2_t.name: avx2_t.id,
-            ssd_t.name: ssd_t.id
-        }
-        forbidden_traits = {}
+        required_traits = [avx2_t.name, ssd_t.name]
+        forbidden_traits = []
 
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
@@ -776,10 +760,8 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case3: required on child
-        required_traits = {
-            geneve_t.name: geneve_t.id
-        }
-        forbidden_traits = {}
+        required_traits = [geneve_t.name]
+        forbidden_traits = []
 
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
@@ -792,12 +774,8 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
 
         # Case3': required on child with forbidden traits
         # Let's validate that cn4 dissapears
-        required_traits = {
-            geneve_t.name: geneve_t.id
-        }
-        forbidden_traits = {
-            ssl_t.name: ssl_t.id
-        }
+        required_traits = [geneve_t.name]
+        forbidden_traits = [ssl_t.name]
 
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
@@ -809,11 +787,8 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case4: multiple required on child
-        required_traits = {
-            geneve_t.name: geneve_t.id,
-            ssl_t.name: ssl_t.id
-        }
-        forbidden_traits = {}
+        required_traits = [geneve_t.name, ssl_t.name]
+        forbidden_traits = []
 
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
@@ -825,11 +800,8 @@ class ProviderTreeDBHelperTestCase(tb.PlacementDbBaseTestCase):
         self.assertEqual(expect_root_uuids, tree_root_uuids)
 
         # Case5: required on root and child
-        required_traits = {
-            avx2_t.name: avx2_t.id,
-            geneve_t.name: geneve_t.id
-        }
-        forbidden_traits = {}
+        required_traits = [avx2_t.name, geneve_t.name]
+        forbidden_traits = []
 
         rp_tuples_with_trait = rp_obj._get_trees_with_traits(
             self.ctx, rp_ids, required_traits, forbidden_traits)
@@ -1010,49 +982,30 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
         """
         # Passing a non-existing resource provider UUID should return an empty
         # list
-        rp_tbl = rp_obj._RP_TBL
-        inv_tbl = rp_obj._INV_TBL
-        alloc_tbl = rp_obj._ALLOC_TBL
-        conn = self.placement_db.get_engine().connect()
-
         # First, set up a record for an "old-style" resource provider with no
         # root provider UUID.
-        ins_rptbl = rp_tbl.insert().values(
-            id=1,
+        rp1 = rp_obj.ResourceProvider(self.ctx,
             uuid=uuids.rp1,
             name='cn1',
-            root_provider_id=None,
-            parent_provider_id=None,
-            generation=42,
+            root_provider_uuid=None,
+            parent_provider_uuid=None,
         )
-        conn.execute(ins_rptbl)
+        rp1.create()
 
         # This is needed for _validate_allocation_requests() at the end
         self.rp_uuid_to_name[uuids.rp1] = 'cn1'
 
         # Add VCPU(resource_class_id=0) inventory to the provider.
-        ins_invtbl = inv_tbl.insert().values(
-            id=1,
-            resource_provider_id=1,
-            resource_class_id=0,
-            total=8,
-            reserved=0,
-            min_unit=1,
-            max_unit=8,
-            step_size=1,
-            allocation_ratio=1.0,
-        )
-        conn.execute(ins_invtbl)
+        inv = inv_obj.Inventory(rp1, orc.VCPU, total=8, reserved=0, min_unit=1,
+                max_unit=8, step_size=1, allocation_ratio=1.0)
+        rp1.add_inventory(inv)
 
         # Consume VCPU inventory
-        ins_alloctbl = alloc_tbl.insert().values(
-            id=1,
-            resource_provider_id=1,
-            consumer_id=uuids.consumer,
-            resource_class_id=0,
-            used=4
-        )
-        conn.execute(ins_alloctbl)
+        consumer = consumer_obj.Consumer(self.ctx, uuid=uuids.consumer)
+        consumer.create()
+        alloc = alloc_obj.Allocation(rp1, consumer=consumer,
+                resource_class=orc.VCPU, used=4)
+        alloc_obj._set_allocations(self.ctx, [alloc])
 
         alloc_cands = self._get_allocation_candidates(
             {'': placement_lib.RequestGroup(
@@ -2341,6 +2294,8 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
              ('cn1', orc.DISK_GB, 1500)],
             [('cn1', orc.VCPU, 2),
              ('ss1', orc.DISK_GB, 1500)],
+            [('cn1', orc.VCPU, 2),
+             ('ss2', orc.DISK_GB, 1500)],
         ]
         self._validate_allocation_requests(expected, alloc_cands)
 
@@ -2350,6 +2305,9 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
                 (orc.DISK_GB, 1600, 0),
             ]),
             'ss1': set([
+                (orc.DISK_GB, 1600, 0),
+            ]),
+            'ss2': set([
                 (orc.DISK_GB, 1600, 0),
             ]),
         }
@@ -2371,11 +2329,15 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
             [('cn1', orc.VCPU, 2),
              ('cn1', orc.DISK_GB, 1500)],
             [('cn1', orc.VCPU, 2),
+             ('ss1', orc.DISK_GB, 1500)],
+            [('cn1', orc.VCPU, 2),
              ('ss2', orc.DISK_GB, 1500)],
             [('cn2', orc.VCPU, 2),
              ('cn2', orc.DISK_GB, 1500)],
             [('cn2', orc.VCPU, 2),
              ('ss2', orc.DISK_GB, 1500)],
+            [('cn2', orc.VCPU, 2),
+             ('ss3', orc.DISK_GB, 1500)],
         ]
         self._validate_allocation_requests(expected, alloc_cands)
 
@@ -2388,12 +2350,17 @@ class AllocationCandidatesTestCase(tb.PlacementDbBaseTestCase):
                 (orc.VCPU, 24, 0),
                 (orc.DISK_GB, 1600, 0),
             ]),
+            'ss1': set([
+                (orc.DISK_GB, 1600, 0),
+            ]),
             'ss2': set([
+                (orc.DISK_GB, 1600, 0),
+            ]),
+            'ss3': set([
                 (orc.DISK_GB, 1600, 0),
             ]),
         }
         self._validate_provider_summary_resources(expected, alloc_cands)
-
         # Let's move to validate multiple member_of scenario
         # The request from agg1 *AND* agg2 would provide only
         # resources from cn1 with its local DISK

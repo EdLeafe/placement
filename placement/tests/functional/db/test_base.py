@@ -70,7 +70,8 @@ def set_sharing_among_agg(rp):
     agg_uuids = rp.get_aggregates()
     if not agg_uuids:
         return
-    providers = rp_obj.provider_ids_matching_aggregates(rp._context, agg_uuids)
+    providers = rp_obj.provider_ids_matching_aggregates(rp._context,
+            [agg_uuids])
     if not providers:
         return
     # Now set the ASSOCIATED relationship.
@@ -79,10 +80,11 @@ def set_sharing_among_agg(rp):
             WITH share
             MATCH (target:RESOURCE_PROVIDER)
             WHERE target.uuid IN %s
+            AND target <> share
             WITH share, target
             MERGE (target)-[:ASSOCIATED]->(share)
             RETURN target
-    """ % (rp.uuid, providers)
+    """ % (rp.uuid, list(providers))
     result = db.execute(query)
 
 

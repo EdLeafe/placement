@@ -15,9 +15,7 @@ import mock
 import os_resource_classes as orc
 from oslo_db import exception as db_exc
 from oslo_utils.fixture import uuidsentinel
-import sqlalchemy as sa
 
-from placement.db.sqlalchemy import models
 from placement import exception
 from placement.objects import allocation as alloc_obj
 from placement.objects import inventory as inv_obj
@@ -132,8 +130,6 @@ class ResourceProviderTestCase(tb.PlacementDbBaseTestCase):
         that the root provider UUID of the updated provider is automatically
         set to the parent provider's root provider UUID.
         """
-        import pudb
-        pudb.set_trace()
         rp1 = self._create_provider('rp1')
 
         # Test the root was auto-set to the create provider's UUID
