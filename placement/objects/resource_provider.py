@@ -680,6 +680,14 @@ class ResourceProvider(object):
         # "root" provider.
         self.parent_provider_uuid = parent_provider_uuid
 
+    @property
+    def root_provider_uuid(self):
+        return _root_provider_for_rp(self._context, self)
+
+    @property
+    def parent_provider_uuid(self):
+        return _parent_provider_for_rp(self._context, self)
+
     def create(self):
         if self.uuid is None:
             raise exception.ObjectActionError(action='create',
@@ -795,6 +803,7 @@ class ResourceProvider(object):
         """ % (self.uuid, rp_gen, new_generation)
         result = db.execute(query)
         if not result:
+            print("RP GEN: old =", rp_gen, "NEW =", new_generation)
             raise exception.ResourceProviderConcurrentUpdateDetected()
         self.generation = new_generation
 
@@ -1004,12 +1013,12 @@ class ResourceProvider(object):
                     val = "null"
                 txt = "rp.%s = %s" % (key, val)
             update_lines.append(txt)
-        if not "created_at" in updates:
+        if not "generation" in updates and not hasattr(self, "generation"):
+            update_lines.append("rp.generation = 0")
+        if not "created_at" in updates and not hasattr(self, "created_at"):
             update_lines.append("rp.created_at = timestamp()")
         if not "updated_at" in updates:
             update_lines.append("rp.updated_at = timestamp()")
-        if not "generation" in updates:
-            update_lines.append("rp.generation = 0")
         update_clause = ", ".join(update_lines)
         query = """
                 MERGE (rp:RESOURCE_PROVIDER {uuid: '%s'})
@@ -1018,7 +1027,11 @@ class ResourceProvider(object):
                 RETURN rp
                 """ % (self.uuid, update_clause)
         result = db.execute(query)
-        self._from_db_object(self.context, self, result[0]["rp"])
+        self._from_db_object(context, self, db.pythonize(result[0]["rp"]))
+        print("RPSAVE" * 11)
+        print("SELF", self.uuid)
+        print("PARNENT", self.parent_provider_uuid)
+        print("ROOT", self.root_provider_uuid)
 
     @staticmethod
     @db_api.placement_context_manager.writer  # For online data migration
@@ -1184,7 +1197,7 @@ def _get_all_by_filters_from_db(context, filters):
     query_lines.append("RETURN rp")
     query = "\n".join(query_lines)
     result = db.execute(query)
-    return [rec["rp"] for rec in result]
+    return [db.pythonize(rec["rp"]) for rec in result]
 
 
 def get_all_by_filters(context, filters=None):
@@ -1413,6 +1426,24 @@ def get_provider_uuids_matching(ctx, resources, required_traits,
         if not filtered_rps:
             return []
     return [prov for prov in provs_with_resource if prov[0] in filtered_rps]
+
+
+@db_api.placement_context_manager.reader
+def _parent_provider_for_rp(ctx, rp):
+    """Given a resource provider, returns the UUID of its parent. If there is
+    no parent for this node, returns None.
+    """
+    rp_uuid = rp.uuid if isinstance(rp, ResourceProvider) else rp
+    query = """
+            MATCH (parent:RESOURCE_PROVIDER)-[:CONTAINS*1]->
+                (rp:RESOURCE_PROVIDER {uuid: '%s'})
+            RETURN parent.uuid AS parent_uuid
+    """ % rp_uuid
+    result = db.execute(query)
+    if result:
+        return result[0]["parent_uuid"]
+    else:
+        return None
 
 
 @db_api.placement_context_manager.reader
