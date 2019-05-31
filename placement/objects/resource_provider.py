@@ -349,12 +349,9 @@ def _get_provider_by_uuid(context, uuid):
         raise exception.NotFound(
                 "No resource provider with uuid %s found" % uuid)
     rp = db.pythonize(result[0]["rp"])
-    provider_ids = provider_uuids_from_uuid(context, uuid)
     return {"uuid": rp.uuid,
             "name": rp.name,
             "generation": rp.generation,
-            "root_provider_uuid": provider_ids.root_uuid,
-            "parent_provider_uuid": provider_ids.parent_uuid,
             "updated_at": rp.updated_at,
             "created_at": rp.created_at,
     }
@@ -656,29 +653,16 @@ class ResourceProvider(object):
     SETTABLE_FIELDS = ('name', 'parent_provider_uuid')
 
     def __init__(self, context, uuid=None, name=None,
-                 generation=None, parent_provider_uuid=None,
-                 root_provider_uuid=None, updated_at=None, created_at=None):
+                 generation=None, parent_provider_uuid=None, updated_at=None,
+                 created_at=None):
         self._context = context
         self.uuid = uuid
         self.name = name
         self.generation = generation
         self.updated_at = updated_at
         self.created_at = created_at
-
-        # UUID of the root provider in a hierarchy of providers. Will be equal
-        # to the uuid field if this provider is the root provider of a
-        # hierarchy. This field is never manually set by the user. Instead, it
-        # is automatically set to either the root provider UUID of the parent
-        # or the UUID of the provider itself if there is no parent. This field
-        # is an optimization field that allows us to very quickly query for all
-        # providers within a particular tree without doing any recursive
-        # querying.
-        # NOTE(edleafe): Neither of the following two fields are used in a
-        # graph DB, and will be removed.
-        self.root_provider_uuid = root_provider_uuid
-        # UUID of the direct parent provider, or None if this provider is a
-        # "root" provider.
-        self.parent_provider_uuid = parent_provider_uuid
+        # Hold this for setting relationships at create() time.
+        self._parent_provider_uuid = parent_provider_uuid
 
     @property
     def root_provider_uuid(self):
@@ -687,6 +671,10 @@ class ResourceProvider(object):
     @property
     def parent_provider_uuid(self):
         return _parent_provider_for_rp(self._context, self)
+
+    @parent_provider_uuid.setter
+    def parent_provider_uuid(self, pp_uuid):
+        self._parent_provider_uuid = pp_uuid
 
     def create(self):
         if self.uuid is None:
@@ -701,7 +689,7 @@ class ResourceProvider(object):
         updates = {
             'name': self.name,
             'uuid': self.uuid,
-            'parent_provider_uuid': self.parent_provider_uuid,
+            'parent_provider_uuid': self._parent_provider_uuid,
         }
         self._create_in_db(self._context, updates)
 
@@ -713,7 +701,7 @@ class ResourceProvider(object):
         # If there are others, ignore them.
         updates = {
             'name': self.name,
-            'parent_provider_uuid': self.parent_provider_uuid,
+            'parent_provider_uuid': self._parent_provider_uuid,
         }
         self._update_in_db(self._context, updates)
 
@@ -803,7 +791,6 @@ class ResourceProvider(object):
         """ % (self.uuid, rp_gen, new_generation)
         result = db.execute(query)
         if not result:
-            print("RP GEN: old =", rp_gen, "NEW =", new_generation)
             raise exception.ResourceProviderConcurrentUpdateDetected()
         self.generation = new_generation
 
@@ -815,10 +802,7 @@ class ResourceProvider(object):
         atts = ["uuid: '%s'" % self.uuid, "name: '%s'" % self.name,
                 "generation: 0", "created_at: timestamp()",
                 "updated_at: timestamp()"]
-        if parent_uuid is None:
-            atts.append("root_provider_uuid: '%s'" % self.uuid)
-            root_uuid = self.uuid
-        else:
+        if parent_uuid is not None:
             # Setting parent to ourselves doesn't make any sense
             if parent_uuid == self.uuid:
                 raise exception.ObjectActionError(
@@ -837,9 +821,6 @@ class ResourceProvider(object):
                 raise exception.ObjectActionError(
                     action='create',
                     reason='parent provider UUID does not exist.')
-            atts.append("parent_provider_uuid: '%s'" % parent_uuid)
-            root_uuid = db.get_root_node(parent_uuid)
-            atts.append("root_provider_uuid: '%s'" % root_uuid)
             parent_create_clause = """
                     WITH rp
                     MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
@@ -858,8 +839,6 @@ class ResourceProvider(object):
         self.generation = rp_db.generation
         self.created_at = rp_db.created_at
         self.updated_at = rp_db.updated_at
-        self.parent_provider_uuid = parent_uuid
-        self.root_provider_uuid = root_uuid
 
     @staticmethod
     @db_api.placement_context_manager.writer
@@ -983,12 +962,6 @@ class ResourceProvider(object):
                         RETURN parent
                         """ % (parent_uuid, self.uuid)
                 result = db.execute(query)
-                # As long as we're maintaining the old foreign key stuff in the
-                # graph, we need to update the root_provider_uuid to the
-                # parent's root.
-                new_root = _root_provider_for_rp(context, parent_uuid)
-                updates["root_provider_uuid"] = new_root
-                self.root_provider_uuid = new_root
             else:
                 # Ensure that a null parent uuid is not being passed when there
                 # already is a parent to this node.
@@ -1028,17 +1001,12 @@ class ResourceProvider(object):
                 """ % (self.uuid, update_clause)
         result = db.execute(query)
         self._from_db_object(context, self, db.pythonize(result[0]["rp"]))
-        print("RPSAVE" * 11)
-        print("SELF", self.uuid)
-        print("PARNENT", self.parent_provider_uuid)
-        print("ROOT", self.root_provider_uuid)
 
     @staticmethod
     @db_api.placement_context_manager.writer  # For online data migration
     def _from_db_object(context, resource_provider, db_resource_provider):
-        # Online data migration to populate root_provider_id
-        for field in ["uuid", "name", "generation", "root_provider_uuid",
-                "parent_provider_uuid", "updated_at", "created_at"]:
+        for field in ["uuid", "name", "generation", "updated_at",
+                "created_at"]:
             setattr(resource_provider, field, db_resource_provider.get(field))
         return resource_provider
 
@@ -1453,8 +1421,10 @@ def _root_provider_for_rp(ctx, rp):
     """
     rp_uuid = rp.uuid if isinstance(rp, ResourceProvider) else rp
     query = """
-            MATCH ()-[:CONTAINS*0]->(root:RESOURCE_PROVIDER)-[:CONTAINS]->
-                (rp:RESOURCE_PROVIDER {uuid: '%s'})
+            MATCH p=(root:RESOURCE_PROVIDER)-[:CONTAINS*0..99]->
+                (nd:RESOURCE_PROVIDER {uuid: '%s'})
+            WITH root, p, size(relationships(p)) AS relsize
+            ORDER BY relsize DESC
             RETURN root.uuid AS root_uuid
     """ % rp_uuid
     result = db.execute(query)

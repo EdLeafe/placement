@@ -72,7 +72,7 @@ def connect():
     return Graph(host=host, password=password)
 
 
-def begin_transaction(g=None, autocommit=True):
+def begin_transaction(g=None, autocommit=False):
     if not g:
         g = connect()
     return g.begin(autocommit=autocommit)

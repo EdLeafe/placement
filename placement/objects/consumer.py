@@ -60,7 +60,7 @@ def delete_consumers_if_no_allocations(ctx, consumer_uuids):
     query = """
             MATCH (cs:CONSUMER)
             WHERE NOT (cs)-[:USES]->() 
-            DELETE cs
+            DETACH DELETE cs
     """
     db.execute(query)
 

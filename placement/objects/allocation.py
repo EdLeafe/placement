@@ -258,7 +258,6 @@ def _create_incomplete_consumer(ctx, consumer_id):
     return
 
 
-@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 @db_api.placement_context_manager.writer
 def _set_allocations(context, allocs):
     """Write a set of allocations.

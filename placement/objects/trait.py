@@ -14,7 +14,6 @@ import collections
 
 import os_traits
 from oslo_concurrency import lockutils
-from oslo_db import api as oslo_db_api
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
 import six
@@ -289,7 +288,6 @@ def _get_all_from_db(context, filters):
     return [db.pythonize(rec["trait"]) for rec in result]
 
 
-@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 # Bug #1760322: If the caller raises an exception, we don't want the trait
 # sync rolled back; so use an .independent transaction
 @db_api.placement_context_manager.writer

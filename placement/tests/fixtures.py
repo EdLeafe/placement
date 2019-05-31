@@ -34,6 +34,7 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
     def __init__(self, conf_fixture, set_config=False):
         """Create a database fixture."""
         super(Database, self).__init__()
+
         if set_config:
             try:
                 conf_fixture.register_opt(
@@ -58,6 +59,7 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
 
         # Clear the graph DB
         graph_db.delete_all()
+        result = graph_db.execute("MATCH (rp:RESOURCE_PROVIDER) RETURN rp")
         # Create the constraints. Eventually this should be moved to somewhere
         # higher-level, but for now this is good enough for tests.
         constraints = [
@@ -74,17 +76,6 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
         ]
         for constraint in constraints:
             graph_db.execute(constraint)
-
-        # so, to work around that placement's setup code really wants to
-        # use the enginefacade, we will patch the engine into it early.
-        # oslo_db is going to patch it anyway later.  So the bug in oslo.db
-        # is that code these days really wants the facade to be set up fully
-        # when it's time to create the database.  When oslo_db's fixtures
-        # were written, enginefacade was not in use yet so it was not
-        # anticipated that everyone would be doing things this way
-        _reset_facade = placement_db.placement_context_manager.patch_engine(
-            engine)
-        self.addCleanup(_reset_facade)
 
         # Make sure db flags are correct at both the start and finish
         # of the test.

@@ -226,7 +226,6 @@ def get_all(context):
     return [ResourceClass(context, **obj) for obj in result_objs]
 
 
-@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 @db_api.placement_context_manager.writer
 def _resource_classes_sync(ctx):
     # Create a set of all resource class in the os_resource_classes library.
