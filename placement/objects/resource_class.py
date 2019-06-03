@@ -69,7 +69,7 @@ class ResourceClass(object):
                 MATCH (rc:RESOURCE_CLASS {name: '%s'})
                 RETURN rc
         """ % name
-        result = db.execute(query)
+        result = context.tx.run(query).data()
         if not result:
             raise exception.ResourceClassNotFound(resource_class=name)
         rec = db.pythonize(result[0])
@@ -141,7 +141,7 @@ class ResourceClass(object):
                 RETURN rc
         """ % (updates["name"], created_at, updated_at)
         try:
-            result = db.execute(query)
+            result = context.tx.run(query).data()
         except db.ClientError:
             raise db_exc.DBDuplicateEntry()
         return result[0]["rc"]
@@ -163,7 +163,7 @@ class ResourceClass(object):
                 WHERE labels(rc)[0] = '%s'
                 RETURN rc
         """ % name
-        result = db.execute(query)
+        result = context.tx.run(query).data()
         if result:
             raise exception.ResourceClassInUse(resource_class=name)
 
@@ -172,7 +172,7 @@ class ResourceClass(object):
                 WITH rc
                 DELETE rc
         """ % name
-        result = db.execute(query)
+        result = context.tx.run(query).data()
 
     def save(self):
         # Never update any standard resource class.
@@ -198,7 +198,7 @@ class ResourceClass(object):
                 RETURN rc
         """ % (name, update_str)
         try:
-            result = db.execute(query)
+            result = context.tx.run(query).data()
         except db.ClientError:
             raise exception.ResourceClassExists(resource_class=name)
 
@@ -221,20 +221,20 @@ def get_all(context):
             MATCH (rc:RESOURCE_CLASS)
             RETURN rc
     """
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     result_objs = [db.pythonize(rec["rc"]) for rec in result]
     return [ResourceClass(context, **obj) for obj in result_objs]
 
 
 @db_api.placement_context_manager.writer
-def _resource_classes_sync(ctx):
+def _resource_classes_sync(context):
     # Create a set of all resource class in the os_resource_classes library.
 
     query = """
             MATCH (rc:RESOURCE_CLASS)
             RETURN rc.name AS name
     """
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     db_std_classes = []
     if result:
         db_std_classes = [res["name"] for res in result
@@ -250,7 +250,7 @@ def _resource_classes_sync(ctx):
                     updated_at: timestamp()})
         """ % rc_name
         try:
-            result = db.execute(query)
+            result = context.tx.run(query).data()
         except db.ClientError:
             pass  # some other process sync'd, just ignore
         except db.TransientError as e:

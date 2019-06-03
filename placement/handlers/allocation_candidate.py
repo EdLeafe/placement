@@ -206,7 +206,7 @@ def _transform_provider_summaries(p_sums, requests, want_version):
     return ret
 
 
-def _exclude_nested_providers(alloc_cands):
+def _exclude_nested_providers(context, alloc_cands):
     """Exclude allocation requests and provider summaries for old microversions
     if they involve more than one provider from the same tree.
     """
@@ -219,7 +219,7 @@ def _exclude_nested_providers(alloc_cands):
         p_uuids = set([rr.resource_provider.uuid
                 for rr in alloc_req.resource_requests])
         if len(p_uuids) > 1:
-            if any([rp_obj.is_nested(*combo)
+            if any([rp_obj.is_nested(context, *combo)
                     for combo in itertools.combinations(p_uuids, 2)]):
                 to_remove.append(alloc_req)
     for allloc_req in to_remove:
@@ -236,7 +236,8 @@ def _exclude_nested_providers(alloc_cands):
     return alloc_cands
 
 
-def _transform_allocation_candidates(alloc_cands, requests, want_version):
+def _transform_allocation_candidates(context, alloc_cands, requests,
+        want_version):
     """Turn supplied AllocationCandidates object into a dict containing
     allocation requests and provider summaries.
 
@@ -247,7 +248,7 @@ def _transform_allocation_candidates(alloc_cands, requests, want_version):
     """
     # exclude nested providers with old microversions
     if not want_version.matches((1, 29)):
-        alloc_cands = _exclude_nested_providers(alloc_cands)
+        alloc_cands = _exclude_nested_providers(context, alloc_cands)
 
     if want_version.matches((1, 12)):
         a_reqs = _transform_allocation_requests_dict(
@@ -321,7 +322,8 @@ def list_allocation_candidates(req):
         raise webob.exc.HTTPBadRequest(six.text_type(exc))
 
     response = req.response
-    trx_cands = _transform_allocation_candidates(cands, requests, want_version)
+    trx_cands = _transform_allocation_candidates(context, cands, requests,
+            want_version)
     json_data = jsonutils.dumps(trx_cands)
     response.body = encodeutils.to_utf8(json_data)
     response.content_type = 'application/json'

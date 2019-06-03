@@ -75,18 +75,7 @@ def set_sharing_among_agg(rp):
     if not providers:
         return
     # Now set the ASSOCIATED relationship.
-    query = """
-            MATCH (share:RESOURCE_PROVIDER {uuid: '%s'})
-            WITH share
-            MATCH (target:RESOURCE_PROVIDER)
-            WHERE target.uuid IN %s
-            AND target <> share
-            WITH share, target
-            MERGE (target)-[:ASSOCIATED]->(share)
-            RETURN target
-    """ % (rp.uuid, list(providers))
-    result = db.execute(query)
-
+    rp_obj.associate(rp._context, rp, providers)
 
 
 def add_inventory(rp, rc, total, **kwargs):

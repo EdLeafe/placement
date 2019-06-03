@@ -14,10 +14,13 @@
 import contextlib
 import functools
 import inspect
+import queue
 
 from oslo_log import log as logging
-import neo4j
+from oslo_utils import excutils
+import py2neo
 
+from placement.db import graph_db as db
 from placement.util import run_once
 
 LOG = logging.getLogger(__name__)
@@ -34,6 +37,8 @@ def transaction_context_provider(cls):
     setattr(cls, 'transaction_ctx', None)
     for attr in ('session', 'connection', 'transaction'):
         setattr(cls, attr, None)
+    # Add the transaction queue
+    setattr(cls, "tx_queue", queue.LifoQueue())
     return cls
 
 
@@ -54,10 +59,10 @@ class FakeEngine():
 
 class TransactionContext():
     def __init__(self, mode=None, independent=False):
-        self.driver = None
         self.transaction = None
         self._mode = mode
         self._independent = independent
+        self.tx_queue = queue.LifoQueue()
 
         # Hackish stuff to satisfy oslo_db
         self._factory = FakeFactory()
@@ -126,31 +131,31 @@ class TransactionContext():
 
     @contextlib.contextmanager
     def _transaction_scope(self, context):
-        if self.driver is None:
-            self.driver = self._connect()
-        with self.driver.session() as session:
-            tx = context.transaction = session.begin_transaction()
-            try:
-                yield
-                if self._mode == "write":
-                    tx.commit()
-            except Exception:
-                tx.rollback()
-            finally:
-                if not tx.closed():
-                    tx.rollback()
+        cxn = db.get_connection()
+        old_tx = context.tx if hasattr(context, "tx") else None
+        tx = cxn.begin()
+        print("BEGIN", id(tx), self._mode)
+        tx.pop = tx.success = False
+        context.tx = tx
+        if old_tx:
+            context.tx_queue.put(old_tx)
+            tx.pop = True
 
-    def _connect(self):
-        """Connects to the Node4j server, using the environment variables if
-        present, or 'localhost' if not.
-        NOTE: This needs to be updated to use CONF settings
-        """
-        host = HOST or os.getenv("NEO4J_HOST") or "localhost"
-        uri = "bolt://%s:7687" % host
-        username = USERNAME or os.getenv("NEO4J_USERNAME") or "neo4j"
-        password = PASSWORD or os.getenv("NEO4J_PASSWORD") or "secret"
-        driver = neo4j.GraphDatabase.driver(uri, auth=(username, password))
-        return driver
+        try:
+            yield
+            # Marking the transaction as successful will result in a COMMIT
+            # when it is closed. When in read mode, we always want to rollback
+            # any changes.
+            tx.success = (self._mode == "write") or self._independent
+        except Exception as e:
+            with excutils.save_and_reraise_exception():
+                tx.success = False
+        finally:
+            print("FINISH", id(tx), tx.success, self._mode)
+            tx.finish()
+            # Pop the transaction from the queue, if any
+            if tx.pop:
+                context.tx = context.tx_queue.get()
 
 
 placement_context_manager = TransactionContext()
@@ -177,5 +182,9 @@ def get_placement_engine():
 
 
 @transaction_context_provider
-class DbContext(object):
+class DbContext(TransactionContext):
     """Stub class for db session handling outside of web requests."""
+    def __init__(self, *args, **kwargs):
+        print("STUB", args, kwargs)
+        super(DbContext, self).__init__(*args, **kwargs)
+        self._independent = True

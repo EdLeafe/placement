@@ -44,7 +44,7 @@ def create_incomplete_consumers(ctx, batch_size):
             MERGE (u)->[:OWNS]->(cs)
             RETURN cs
     """ % user_uuid
-    db.execute(query)
+    ctx.tx.run(query)
 
 
 @db_api.placement_context_manager.writer
@@ -57,12 +57,14 @@ def delete_consumers_if_no_allocations(ctx, consumer_uuids):
     :param consumer_uuids: UUIDs of the consumers to check and maybe delete
     """
     # Delete consumers that have no usages
+    return
     query = """
             MATCH (cs:CONSUMER)
             WHERE NOT (cs)-[:USES]->() 
+            WITH cs
             DETACH DELETE cs
     """
-    db.execute(query)
+    ctx.tx.run(query)
 
 
 @db_api.placement_context_manager.reader
@@ -77,7 +79,7 @@ def _get_consumer_by_uuid(ctx, uuid):
             OPTIONAL MATCH (u:USER)-[:BELONGS_TO]->(pj)
             RETURN cs, pj, u
     """ % uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     if not result:
         raise exception.ConsumerNotFound(uuid=uuid)
     rec = result[0]
@@ -108,7 +110,7 @@ def _delete_consumer(ctx, consumer):
             MATCH (cs:CONSUMER {uuid: '%s'})
             DETACH DELETE cs
     """ % consumer.uuid
-    db.execute(query)
+    ctx.tx.run(query)
 
 
 class Consumer(object):
@@ -147,7 +149,7 @@ class Consumer(object):
                     MERGE (cs:CONSUMER {uuid: '%s', generation: %s})
                     RETURN cs
             """ % (self.uuid, gen)
-            db.execute(query)
+            ctx.tx.run(query)
         gen = self.generation or 0
         _create_in_db(self._context, gen)
         self.generation = gen
@@ -179,7 +181,7 @@ class Consumer(object):
                         WITH cs, relationships(p)[0] AS owns
                         DELETE owns
                 """ % (self.uuid, self.generation, user_uuid)
-            db.execute(query)
+            ctx.tx.run(query)
         _update_in_db(self._context)
 
     def increment_generation(self):
@@ -199,7 +201,7 @@ class Consumer(object):
                 SET cs.generation = %s
                 RETURN cs
         """ % (self.uuid, consumer_gen, new_generation)
-        result = db.execute(query)
+        result = self._context.tx.run(query).data()
         if not result:
             raise exception.ConcurrentUpdateDetected
         self.generation = new_generation

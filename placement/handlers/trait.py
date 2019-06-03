@@ -212,11 +212,6 @@ def list_traits_for_resource_provider(req):
 @microversion.version_handler('1.6')
 @util.require_content('application/json')
 def update_traits_for_resource_provider(req):
-
-    from placement.db import graph_db as db
-    result = db.execute("MATCH (rp:RESOURCE_PROVIDER) RETURN rp")
-    print("*"*88)
-    print([db.pythonize(rec["rp"]) for rec in result])
     context = req.environ['placement.context']
     context.can(policies.RP_TRAIT_UPDATE)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]

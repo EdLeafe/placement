@@ -5,9 +5,18 @@ import six
 import uuid
 
 from py2neo import ClientError, Graph, Node, TransientError
+from neo4j import Transaction
 
 HOST = "notebook.leafe.com"
 PASSWORD = "placement"
+
+_connection = None
+
+def get_connection():
+    global _connection
+    if _connection is None:
+        _connection = _connect()
+    return _connection
 
 
 class DotDict(dict):
@@ -62,7 +71,7 @@ def pythonize(gr_node):
     return DotDict(ret)
 
 
-def connect():
+def _connect():
     """Connects to the Node4j server, using the environment variables if
     present, or 'localhost' if not.
     NOTE: This needs to be updated to use CONF settings
@@ -74,7 +83,7 @@ def connect():
 
 def begin_transaction(g=None, autocommit=False):
     if not g:
-        g = connect()
+        g = _connect()
     return g.begin(autocommit=autocommit)
 
 
@@ -98,7 +107,7 @@ def execute(query, tx=None, autocommit=True):
 
 
 def delete_all():
-    g = connect()
+    g = _connect()
     tx = begin_transaction(g=g, autocommit=False)
     g.delete_all()
     tx.commit()

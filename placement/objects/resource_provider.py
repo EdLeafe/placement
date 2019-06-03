@@ -52,12 +52,12 @@ def _get_current_inventory_resources(ctx, rp):
             MATCH (rp {uuid: '%s'})-[:PROVIDES]->(rc)
             RETURN labels(rc)[0] AS rc_name
     """ % rp_uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     resources = [rec["rc_name"] for rec in result]
     return set(resources)
 
 
-def has_allocations(rp, rcs=None):
+def has_allocations(ctx, rp, rcs=None):
     """Returns True if there are any allocations against resources from the
     specified provider. If `rcs` is specified, the check is limited to
     allocations against just the resource classes specified.
@@ -66,7 +66,7 @@ def has_allocations(rp, rcs=None):
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-->(inv)<-[:USES]-(cs)
             RETURN labels(inv)[0] AS rc
     """ % rp.uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     if not result:
         return False
     if rcs:
@@ -78,7 +78,7 @@ def has_allocations(rp, rcs=None):
     return True
 
 
-def get_allocated_inventory(rp, rcs=None):
+def get_allocated_inventory(ctx, rp, rcs=None):
     """Returns the list of resource classes for any inventory that has
     allocations against it, along with the total amount allocated. If `rcs` is
     specified, the returned list is limited to only those resource classes in
@@ -90,7 +90,7 @@ def get_allocated_inventory(rp, rcs=None):
             WITH last(relationships(p)) AS usages, labels(inv)[0] AS rcname
             RETURN rcname, sum(usages.amount) AS used
     """ % rp_uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     if not result:
         return {}
     allocs = {rec["rcname"]: rec["used"] for rec in result}
@@ -116,7 +116,7 @@ def _delete_inventory_from_provider(ctx, rp, to_delete=None):
                       to_delete is None, all inventory will be deleted.
     """
     rp_uuid = rp if isinstance(rp, six.string_types) else rp.uuid
-    allocs = get_allocated_inventory(rp_uuid, rcs=to_delete)
+    allocs = get_allocated_inventory(ctx, rp_uuid, rcs=to_delete)
     if allocs:
         alloc_keys = ", ".join(allocs.keys())
         raise exception.InventoryInUse(resource_classes=alloc_keys,
@@ -131,7 +131,7 @@ def _delete_inventory_from_provider(ctx, rp, to_delete=None):
                 DELETE rel
                 RETURN id(rc) AS rcid
         """ % (rp_uuid, rc)
-        result = db.execute(query)
+        result = ctx.tx.run(query).data()
         if not result:
             return 0
         else: 
@@ -143,7 +143,7 @@ def _delete_inventory_from_provider(ctx, rp, to_delete=None):
                     WITH inv
                     DELETE inv
             """ % rcid
-            result = db.execute(query)
+            result = ctx.tx.run(query)
     return len(to_delete)
 
 
@@ -163,7 +163,7 @@ def _add_inventory_to_provider(ctx, rp, inv_list):
             WHERE labels(rc)[0] IN %s
             RETURN labels(rc)[0] AS rc_name
     """ % (rp.uuid, rc_to_add)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     if result:
         raise db_exc.DBDuplicateEntry()
     inv_adds = []
@@ -185,7 +185,7 @@ def _add_inventory_to_provider(ctx, rp, inv_list):
             WITH rp
             %s
     """ % (rp.uuid, creates)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
 
 def _update_inventory_for_provider(ctx, rp, inv_list, to_update):
     """Updates existing inventory records for the supplied resource provider.
@@ -199,7 +199,7 @@ def _update_inventory_for_provider(ctx, rp, inv_list, to_update):
     :returns: A list of (uuid, class) tuples that have exceeded their
               capacity after this inventory update.
     """
-    current_allocs = get_allocated_inventory(rp)
+    current_allocs = get_allocated_inventory(ctx, rp)
     exceeded = []
     for rc in to_update:
         inv_record = inv_obj.find(inv_list, rc)
@@ -208,7 +208,7 @@ def _update_inventory_for_provider(ctx, rp, inv_list, to_update):
                 MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-->(rc:%s)
                 RETURN id(rc) as rcid
         """ % (rp.uuid, rc)
-        result = db.execute(query)
+        result = ctx.tx.run(query)
         if not result:
             raise exception.InventoryWithResourceClassNotFound(
                 resource_class=rc)
@@ -230,12 +230,12 @@ def _update_inventory_for_provider(ctx, rp, inv_list, to_update):
                 SET %s
                 RETURN rc
         """ % (rcid, update_clause)
-        result = db.execute(query)
+        result = ctx.tx.run(query).data()
     return exceeded
 
 
 @db_api.placement_context_manager.writer
-def _add_inventory(context, rp, inventory):
+def _add_inventory(ctx, rp, inventory):
     """Add one Inventory that wasn't already on the provider.
 
     :raises `exception.ResourceClassNotFound` if inventory.resource_class
@@ -246,46 +246,46 @@ def _add_inventory(context, rp, inventory):
             MATCH (rc:RESOURCE_CLASS {name: '%s'})
             RETURN rc
             """ % rc
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     if not result:
         raise exception.ResourceClassNotFound(resource_class=rc)
-    _add_inventory_to_provider(context, rp, [inventory])
+    _add_inventory_to_provider(ctx, rp, [inventory])
     rp.increment_generation()
 
 
 @db_api.placement_context_manager.writer
-def _update_inventory(context, rp, inventory):
+def _update_inventory(ctx, rp, inventory):
     """Update an inventory already on the provider.
 
     :raises `exception.ResourceClassNotFound` if inventory.resource_class
             cannot be found in the DB.
     """
-    exceeded = _update_inventory_for_provider(
-        context, rp, [inventory], set([inventory.resource_class]))
+    exceeded = _update_inventory_for_provider(ctx, rp, [inventory],
+            set([inventory.resource_class]))
     rp.increment_generation()
     return exceeded
 
 
 @db_api.placement_context_manager.writer
-def _delete_inventory(context, rp, resource_class):
+def _delete_inventory(ctx, rp, resource_class):
     """Delete up to one Inventory of the given resource_class string.
 
     :raises `exception.ResourceClassNotFound` if resource_class
             cannot be found in the DB.
     """
-    if not _delete_inventory_from_provider(context, rp, [resource_class]):
+    if not _delete_inventory_from_provider(ctx, rp, [resource_class]):
         raise exception.NotFound(
             "No inventory of class %s found for delete" % resource_class)
     rp.increment_generation()
 
 
 @db_api.placement_context_manager.writer
-def _set_inventory(context, rp, inv_list):
+def _set_inventory(ctx, rp, inv_list):
     """Given a list of Inventory objects, replaces the inventory of the
     resource provider in a safe, atomic fashion using the resource
     provider's generation as a consistent view marker.
 
-    :param context: Nova RequestContext.
+    :param ctx: Session context to use
     :param rp: `ResourceProvider` object upon which to set inventory.
     :param inv_list: A list of `Inventory` objects to save to backend storage.
     :returns: A list of (uuid, class) tuples that have exceeded their
@@ -299,7 +299,7 @@ def _set_inventory(context, rp, inv_list):
     :raises `exception.InventoryInUse` if we attempt to delete inventory
             from a provider that has allocations for that resource class.
     """
-    existing_resources = _get_current_inventory_resources(context, rp)
+    existing_resources = _get_current_inventory_resources(ctx, rp)
     these_resources = set([r.resource_class for r in inv_list])
 
     # Determine which resources we should be adding, deleting and/or
@@ -311,12 +311,12 @@ def _set_inventory(context, rp, inv_list):
     exceeded = []
 
     if to_delete:
-        _delete_inventory_from_provider(context, rp, to_delete)
+        _delete_inventory_from_provider(ctx, rp, to_delete)
     if to_add:
         inv_to_add = [inv for inv in inv_list if inv.resource_class in to_add]
-        _add_inventory_to_provider(context, rp, inv_to_add)
+        _add_inventory_to_provider(ctx, rp, inv_to_add)
     if to_update:
-        exceeded = _update_inventory_for_provider(context, rp, inv_list,
+        exceeded = _update_inventory_for_provider(ctx, rp, inv_list,
                                                   to_update)
 
     # Here is where we update the resource provider's generation value.  If
@@ -333,7 +333,7 @@ def _set_inventory(context, rp, inv_list):
 
 
 @db_api.placement_context_manager.reader
-def _get_provider_by_uuid(context, uuid):
+def _get_provider_by_uuid(ctx, uuid):
     """Given a UUID, return a dict of information about the resource provider
     from the database.
 
@@ -344,7 +344,7 @@ def _get_provider_by_uuid(context, uuid):
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
             RETURN rp
     """ % uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     if not result:
         raise exception.NotFound(
                 "No resource provider with uuid %s found" % uuid)
@@ -358,7 +358,7 @@ def _get_provider_by_uuid(context, uuid):
 
 
 @db_api.placement_context_manager.reader
-def _get_aggregates_by_provider(context, rp):
+def _get_aggregates_by_provider(ctx, rp):
     """Returns a list of UUIDs of any aggregates for the supplied resource
     provider.
     """
@@ -366,11 +366,11 @@ def _get_aggregates_by_provider(context, rp):
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[:ASSOCIATED]-> (agg)
             RETURN agg.uuid AS agg_uuid
     """ % rp.uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return [rec["agg_uuid"] for rec in result]
 
 @db_api.placement_context_manager.reader
-def anchors_for_sharing_providers(context, rp_uuids):
+def anchors_for_sharing_providers(ctx, rp_uuids):
     """Given a list of UUIDs of sharing providers, returns a set of
     tuples of (sharing provider UUID, anchor provider UUID), where each of
     anchor is the unique root provider of a tree associated with the same
@@ -386,7 +386,7 @@ def anchors_for_sharing_providers(context, rp_uuids):
             WHERE shared.uuid in %s
             RETURN shared.uuid as s_uuid, anchor.uuid AS a_uuid 
     """ % rp_uuids
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return set((rec["s_uuid"], rec["a_uuid"]) for rec in result)
 
 
@@ -399,11 +399,11 @@ def _ensure_aggregate(ctx, agg_uuid):
             MERGE (agg:AGGREGATE {uuid: '%s'})
             RETURN agg
     """ % agg_uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return agg_uuid
 
 
-def associate(context, resource_provider, rp_uuids):
+def associate(ctx, resource_provider, rp_uuids):
     """Associates one or more resource providers with the specified resource
     provider. Note that the relationship is from RP to shared entity, as this
     is needed for resolving :PROVIDES relationships; e.g.:
@@ -418,10 +418,10 @@ def associate(context, resource_provider, rp_uuids):
             MERGE (rp)-[:ASSOCIATED]->(share)
             RETURN share
     """ % (resource_provider.uuid, rp_uuids)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
 
 @db_api.placement_context_manager.writer
-def _set_aggregates(context, resource_provider, provided_aggregates,
+def _set_aggregates(ctx, resource_provider, provided_aggregates,
                     increment_generation=False):
     """When aggregate uuids are persisted no validation is done to ensure that
     they refer to something that has meaning elsewhere. It is assumed that code
@@ -432,7 +432,7 @@ def _set_aggregates(context, resource_provider, provided_aggregates,
     noise. Not doing now to move things along.
     """
     provided_aggregates = set(provided_aggregates)
-    existing_aggregates = _get_aggregates_by_provider(context,
+    existing_aggregates = _get_aggregates_by_provider(ctx,
             resource_provider)
     # A list of aggregate UUIDs that will be associated with the provider
     aggs_to_associate = provided_aggregates - set(existing_aggregates)
@@ -458,7 +458,7 @@ def _set_aggregates(context, resource_provider, provided_aggregates,
                 %s
                 RETURN rp
         """ % (resource_provider.uuid, create_clause, agg_withs, assoc_clause)
-        result = db.execute(query)
+        result = ctx.tx.run(query).data()
 
     if aggs_to_disassociate:
         # Delete the agg relationships no longer needed
@@ -469,14 +469,14 @@ def _set_aggregates(context, resource_provider, provided_aggregates,
                 WHERE agg.uuid in %s
                 DELETE a
         """ % (resource_provider.uuid, aggs_to_disassociate)
-        result = db.execute(query)
+        result = ctx.tx.run(query).data()
         if increment_generation:
             resource_provider.increment_generation()
         return
 
 
 @db_api.placement_context_manager.writer
-def _set_traits(context, rp, traits):
+def _set_traits(ctx, rp, traits):
     """Given a ResourceProvider object and a list of Trait objects, replaces
     the set of traits associated with the resource provider.
 
@@ -488,7 +488,7 @@ def _set_traits(context, rp, traits):
     :param traits: List of Trait objects
     """
     # Get the list of all trait names
-    trait_names = trait_obj.Trait.get_all_names(context)
+    trait_names = trait_obj.Trait.get_all_names(ctx)
     # Get the traits for this RP
     query = """
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
@@ -497,7 +497,7 @@ def _set_traits(context, rp, traits):
             WHERE t.name IN keys(properties(rp))
             RETURN t.name AS trait_name
     """ % rp.uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     existing_traits = set([rec["trait_name"] for rec in result])
     new_traits = set([trait.name for trait in traits])
     to_add = new_traits - existing_traits
@@ -524,12 +524,12 @@ def _set_traits(context, rp, traits):
             %s
             RETURN rp
     """ % (rp.uuid, add_clause, del_clause)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     rp.increment_generation()
 
 
 @db_api.placement_context_manager.reader
-def _has_child_providers(context, rp_uuid):
+def _has_child_providers(ctx, rp_uuid):
     """Returns True if the supplied resource provider has any child providers,
     False otherwise
     """
@@ -537,12 +537,12 @@ def _has_child_providers(context, rp_uuid):
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[:CONTAINS]->(child)
             RETURN count(child) AS num
     """ % rp_uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return bool(result[0]["num"])
 
 
 @db_api.placement_context_manager.writer
-def _set_root_provider_id(context, rp_id, root_id):
+def _set_root_provider_id(ctx, rp_id, root_id):
     """Simply sets the root_provider_id value for a provider identified by
     rp_id. Used in implicit online data migration via REST API getting
     resource providers.
@@ -556,7 +556,7 @@ def _set_root_provider_id(context, rp_id, root_id):
 
 
 @db_api.placement_context_manager.writer
-def set_root_provider_ids(context, batch_size):
+def set_root_provider_ids(ctx, batch_size):
     """Simply sets the root_provider_id value for a provider identified by
     rp_id. Used in explicit online data migration via CLI.
 
@@ -572,7 +572,7 @@ ProviderIds = collections.namedtuple(
         "ProviderIds", "uuid parent_uuid root_uuid")
 
 
-def provider_uuids_from_rp_uuids(context, rp_uuids):
+def provider_uuids_from_rp_uuids(ctx, rp_uuids):
     """Given an iterable of resource provider UUIDs, returns a dict,
     keyed by provider UUID, of ProviderIds namedtuples describing those
     providers.
@@ -592,11 +592,11 @@ def provider_uuids_from_rp_uuids(context, rp_uuids):
         ORDER BY uuid, parent_uuid, root_uuid
         RETURN uuid, parent_uuid, root_uuid
     """ % rp_uuids
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return {rec["uuid"]: ProviderIds(**rec) for rec in result}
 
 
-def provider_uuids_from_uuid(context, uuid):
+def provider_uuids_from_uuid(ctx, uuid):
     """Given the UUID of a resource provider, returns a namedtuple
     (ProviderIds) with the UUID, parent provider's UUID, and the root provider
     UUID.
@@ -606,10 +606,10 @@ def provider_uuids_from_uuid(context, uuid):
               ResourceProvider with a matching uuid.
     :param uuid: The UUID of the provider to look up
     """
-    return provider_uuids_from_rp_uuids(context, [uuid]).get(uuid)
+    return provider_uuids_from_rp_uuids(ctx, [uuid]).get(uuid)
 
 
-def provider_ids_matching_aggregates(context, member_of, rp_uuids=None):
+def provider_ids_matching_aggregates(ctx, member_of, rp_uuids=None):
     """Given a list of lists of aggregate UUIDs, return the UUIDs of all
     resource providers associated with the aggregates.
 
@@ -645,17 +645,17 @@ def provider_ids_matching_aggregates(context, member_of, rp_uuids=None):
             {agg_clause}
             RETURN rp.uuid AS rp_uuid
     """.format(rp_clause=rp_clause, agg_clause=agg_clause)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return set([rec["rp_uuid"] for rec in result])
 
 
 class ResourceProvider(object):
     SETTABLE_FIELDS = ('name', 'parent_provider_uuid')
 
-    def __init__(self, context, uuid=None, name=None,
+    def __init__(self, ctx, uuid=None, name=None,
                  generation=None, parent_provider_uuid=None, updated_at=None,
                  created_at=None):
-        self._context = context
+        self._context = ctx
         self.uuid = uuid
         self.name = name
         self.generation = generation
@@ -666,10 +666,12 @@ class ResourceProvider(object):
 
     @property
     def root_provider_uuid(self):
+        print("rprov")
         return _root_provider_for_rp(self._context, self)
 
     @property
     def parent_provider_uuid(self):
+        print("pprov")
         return _parent_provider_for_rp(self._context, self)
 
     @parent_provider_uuid.setter
@@ -706,14 +708,14 @@ class ResourceProvider(object):
         self._update_in_db(self._context, updates)
 
     @classmethod
-    def get_by_uuid(cls, context, uuid):
+    def get_by_uuid(cls, ctx, uuid):
         """Returns a new ResourceProvider object with the supplied UUID.
 
         :raises NotFound if no such provider could be found
         :param uuid: UUID of the provider to search for
         """
-        rp_rec = _get_provider_by_uuid(context, uuid)
-        return cls._from_db_object(context, cls(context), rp_rec)
+        rp_rec = _get_provider_by_uuid(ctx, uuid)
+        return cls._from_db_object(ctx, cls(ctx), rp_rec)
 
     def add_inventory(self, inventory):
         """Add one new Inventory to the resource provider.
@@ -789,13 +791,13 @@ class ResourceProvider(object):
                 SET rp.generation = %s
                 RETURN rp
         """ % (self.uuid, rp_gen, new_generation)
-        result = db.execute(query)
+        result = self._context.tx.run(query).data()
         if not result:
             raise exception.ResourceProviderConcurrentUpdateDetected()
         self.generation = new_generation
 
     @db_api.placement_context_manager.writer
-    def _create_in_db(self, context, updates):
+    def _create_in_db(self, ctx, updates):
         # User supplied a parent, let's make sure it exists
         parent_uuid = updates.pop('parent_provider_uuid')
         parent_create_clause = ""
@@ -816,7 +818,7 @@ class ResourceProvider(object):
                     MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
                     RETURN parent
                     """ % parent_uuid
-            result = db.execute(query)
+            result = ctx.tx.run(query).data()
             if not result:
                 raise exception.ObjectActionError(
                     action='create',
@@ -834,7 +836,7 @@ class ResourceProvider(object):
                 %s
                 RETURN rp
                 """ % (att_clause, parent_create_clause)
-        result = db.execute(query)
+        result = ctx.tx.run(query).data()
         rp_db = db.pythonize(result[0]["rp"])
         self.generation = rp_db.generation
         self.created_at = rp_db.created_at
@@ -842,13 +844,13 @@ class ResourceProvider(object):
 
     @staticmethod
     @db_api.placement_context_manager.writer
-    def _delete(context, uuid):
+    def _delete(ctx, uuid):
         # First, we want to make sure that the RP exists
         query = """
                 MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
                 RETURN rp
         """ % uuid
-        result = db.execute(query)
+        result = ctx.tx.run(query).data()
         if not result:
             raise exception.NotFound(
                     "No resource provider with uuid %s found" % uuid)
@@ -857,19 +859,19 @@ class ResourceProvider(object):
         # resource_providers.parent_provider_id will prevent deletion of the
         # parent within the transaction below. This is just a quick
         # short-circuit outside of the transaction boundary.
-        if _has_child_providers(context, uuid):
+        if _has_child_providers(ctx, uuid):
             raise exception.CannotDeleteParentResourceProvider()
 
         # Delete any inventory associated with the resource provider. This will
         # fail if the inventory has any allocations against it.
-        _delete_inventory_from_provider(context, uuid)
+        _delete_inventory_from_provider(ctx, uuid)
         query = """
                 MATCH p=(me:RESOURCE_PROVIDER {uuid: '%s'})-[:PROVIDES]->(inv)
                 WITH me, inv, last(relationships(p)) AS provisions
                 DELETE provisions
                 """ % uuid
         try:
-            result = db.execute(query)
+            result = ctx.tx.run(query).data()
         except db.ClientError:
             raise exception.ResourceProviderInUse()
         query = """
@@ -878,7 +880,7 @@ class ResourceProvider(object):
                 DELETE inv
                 """ % uuid
         try:
-            result = db.execute(query)
+            result = ctx.tx.run(query).data()
         except db.ClientError:
             raise exception.ResourceProviderInUse()
 
@@ -888,10 +890,10 @@ class ResourceProvider(object):
                 DETACH DELETE rp
                 RETURN rp
                 """ % uuid
-        result = db.execute(query)
+        result = ctx.tx.run(query).data()
 
     @db_api.placement_context_manager.writer
-    def _update_in_db(self, context, updates):
+    def _update_in_db(self, ctx, updates):
         # A list of resource providers in the same tree with the
         # resource provider to update
         same_tree = []
@@ -906,7 +908,7 @@ class ResourceProvider(object):
             # * potentially orphaning heretofore-descendants
             #
             # So, for now, let's just prevent re-parenting...
-            my_ids = provider_uuids_from_uuid(context, self.uuid)
+            my_ids = provider_uuids_from_uuid(ctx, self.uuid)
             curr_parent_uuid = my_ids.parent_uuid if my_ids else None
             parent_uuid = updates.get("parent_provider_uuid")
             if parent_uuid is not None:
@@ -921,7 +923,7 @@ class ResourceProvider(object):
                         MATCH (parent:RESOURCE_PROVIDER {uuid: '%s'})
                         RETURN parent.uuid AS parent_uuid
                         """ % parent_uuid
-                result = db.execute(query)
+                result = ctx.tx.run(query).data()
                 if not result:
                     raise exception.ObjectActionError(
                         action="create",
@@ -946,7 +948,7 @@ class ResourceProvider(object):
                             MATCH (rp:RESOURCE_PROVIDER {uuid:'%s'})
                             RETURN rp
                             """ % (self.uuid, self.uuid, self.uuid)
-                    result = db.execute(query)
+                    result = ctx.tx.run(query).data()
                     tree_uuids = [rec["rp"]["uuid"] for rec in result]
                     if parent_uuid in tree_uuids:
                         raise exception.ObjectActionError(
@@ -961,7 +963,7 @@ class ResourceProvider(object):
                         CREATE (parent)-[:CONTAINS]->(me)
                         RETURN parent
                         """ % (parent_uuid, self.uuid)
-                result = db.execute(query)
+                result = ctx.tx.run(query).data()
             else:
                 # Ensure that a null parent uuid is not being passed when there
                 # already is a parent to this node.
@@ -970,7 +972,7 @@ class ResourceProvider(object):
                             (:RESOURCE_PROVIDER {uuid: '%s'})
                         RETURN parent
                         """ % self.uuid
-                result = db.execute(query)
+                result = ctx.tx.run(query).data()
                 if result:
                     raise exception.ObjectActionError(
                         action='update',
@@ -999,12 +1001,12 @@ class ResourceProvider(object):
                 SET %s
                 RETURN rp
                 """ % (self.uuid, update_clause)
-        result = db.execute(query)
-        self._from_db_object(context, self, db.pythonize(result[0]["rp"]))
+        result = ctx.tx.run(query).data()
+        self._from_db_object(ctx, self, db.pythonize(result[0]["rp"]))
 
     @staticmethod
     @db_api.placement_context_manager.writer  # For online data migration
-    def _from_db_object(context, resource_provider, db_resource_provider):
+    def _from_db_object(ctx, resource_provider, db_resource_provider):
         for field in ["uuid", "name", "generation", "updated_at",
                 "created_at"]:
             setattr(resource_provider, field, db_resource_provider.get(field))
@@ -1063,12 +1065,12 @@ def get_providers_with_shared_capacity(ctx, rc_name, amount, member_of=None):
             WHERE capacity -  total_used >= %s
             RETURN rp.uuid AS rp_uuid
     """ % (rc_name, amount)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return [rec["rp_uuid"] for rec in result]
 
 
 @db_api.placement_context_manager.reader
-def _get_all_by_filters_from_db(context, filters):
+def _get_all_by_filters_from_db(ctx, filters):
     # Eg. filters can be:
     #  filters = {
     #      'name': <name>,
@@ -1132,7 +1134,7 @@ def _get_all_by_filters_from_db(context, filters):
     if resources:
         rps_with_rsrcs = []
         for rc_name, amount in resources.items():
-            rps = get_providers_with_resource(context, rc_name, amount)
+            rps = get_providers_with_resource(ctx, rc_name, amount)
             rps_with_rsrcs.append(set([rp[0] for rp in rps]))
         good_rps = rps_with_rsrcs[0]
         for rsrc_set in rps_with_rsrcs[1:]:
@@ -1164,11 +1166,11 @@ def _get_all_by_filters_from_db(context, filters):
         query_lines.append("WITH rp")
     query_lines.append("RETURN rp")
     query = "\n".join(query_lines)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return [db.pythonize(rec["rp"]) for rec in result]
 
 
-def get_all_by_filters(context, filters=None):
+def get_all_by_filters(ctx, filters=None):
     """Returns a list of `ResourceProvider` objects that have sufficient
     resources in their inventories to satisfy the amounts specified in the
     `filters` parameter.
@@ -1176,7 +1178,7 @@ def get_all_by_filters(context, filters=None):
     If no resource providers can be found, the function will return an
     empty list.
 
-    :param context: `placement.context.RequestContext` that may be used to
+    :param ctx: `placement.context.RequestContext` that may be used to
                     grab a DB connection.
     :param filters: Can be `name`, `uuid`, `member_of`, `in_tree` or
                     `resources` where `member_of` is a list of list of
@@ -1187,8 +1189,8 @@ def get_all_by_filters(context, filters=None):
                     classes.
     :type filters: dict
     """
-    resource_providers = _get_all_by_filters_from_db(context, filters)
-    return [ResourceProvider(context, **rp) for rp in resource_providers]
+    resource_providers = _get_all_by_filters_from_db(ctx, filters)
+    return [ResourceProvider(ctx, **rp) for rp in resource_providers]
 
 
 def _filter_rps_by_traits(ctx, traits, any_or_all):
@@ -1200,7 +1202,7 @@ def _filter_rps_by_traits(ctx, traits, any_or_all):
         WHERE %s
         RETURN rp.uuid AS rp_uuid
     """ % trait_str
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return set([rec["rp_uuid"] for rec in result])
 
 
@@ -1246,7 +1248,7 @@ def has_provider_trees(ctx):
             MATCH p=()-[:CONTAINS]->()
             RETURN sum(size(relationships(p))) AS nest_count
     """
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return result[0]["nest_count"] > 0
 
 
@@ -1407,7 +1409,7 @@ def _parent_provider_for_rp(ctx, rp):
                 (rp:RESOURCE_PROVIDER {uuid: '%s'})
             RETURN parent.uuid AS parent_uuid
     """ % rp_uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     if result:
         return result[0]["parent_uuid"]
     else:
@@ -1427,7 +1429,7 @@ def _root_provider_for_rp(ctx, rp):
             ORDER BY relsize DESC
             RETURN root.uuid AS root_uuid
     """ % rp_uuid
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     if result:
         return result[0]["root_uuid"]
     else:
@@ -1467,7 +1469,7 @@ def get_providers_with_resource(ctx, rc_name, amount, tree_root_uuid=None):
             AND numrel IS null
             RETURN rp.uuid AS rp_uuid, root.uuid AS root_uuid
     """.format(rt=tree_root_clause, rc_name=rc_name, amount=amount)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return set((rec["rp_uuid"], rec["root_uuid"]) for rec in result)
 
 
@@ -1510,7 +1512,7 @@ def _get_trees_with_traits(ctx, rp_uuids, required_traits, forbidden_traits):
             ORDER BY rp, root
             RETURN rp, root
     """
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return ((rec["rp"], rec["root"]) for rec in result)
 
 
@@ -1672,7 +1674,7 @@ def get_trees_matching_all(ctx, resources, required_traits, forbidden_traits,
     return provs_with_inv
 
 
-def is_nested(rp1_uuid, rp2_uuid):
+def is_nested(ctx, rp1_uuid, rp2_uuid):
     """Returns True if the two resource providers are related with a :CONTAINS
     relationship. The direction of the relationship doesn't matter.
     """
@@ -1680,5 +1682,5 @@ def is_nested(rp1_uuid, rp2_uuid):
             MATCH p=(rp1 {uuid: '%s'})-[:CONTAINS*]-(rp2 {uuid: '%s'})
             RETURN p
     """ % (rp1_uuid, rp2_uuid)
-    result = db.execute(query)
+    result = ctx.tx.run(query).data()
     return bool(result)

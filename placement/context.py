@@ -13,11 +13,12 @@
 from oslo_context import context
 from oslo_db.sqlalchemy import enginefacade
 
+from placement import db_api
 from placement import exception
 from placement import policy
 
 
-@enginefacade.transaction_context_provider
+@db_api.transaction_context_provider
 class RequestContext(context.RequestContext):
 
     def __init__(self, *args, **kwargs):

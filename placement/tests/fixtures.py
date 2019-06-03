@@ -59,7 +59,6 @@ class Database(test_fixtures.GeneratesSchema, test_fixtures.AdHocDbFixture):
 
         # Clear the graph DB
         graph_db.delete_all()
-        result = graph_db.execute("MATCH (rp:RESOURCE_PROVIDER) RETURN rp")
         # Create the constraints. Eventually this should be moved to somewhere
         # higher-level, but for now this is good enough for tests.
         constraints = [

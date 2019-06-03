@@ -646,7 +646,7 @@ def _consolidate_allocation_requests(areqs):
 
 
 @db_api.placement_context_manager.reader
-def _get_usages_by_provider_tree(ctx, root_uuids):
+def _get_usages_by_provider_tree(context, root_uuids):
     """Returns a row iterator of usage records grouped by provider UUID
     for all resource providers in all trees indicated in the ``root_uuids``.
     """
@@ -665,7 +665,7 @@ def _get_usages_by_provider_tree(ctx, root_uuids):
                 inv.max_unit AS max_unit,
                 sum(usages.amount) AS used
     """ % list(root_uuids)
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     return result
 
 

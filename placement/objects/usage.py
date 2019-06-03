@@ -42,7 +42,7 @@ def _get_all_by_resource_provider_uuid(context, rp_uuid):
             WITH labels(rc)[0] AS rcname, relationships(p)[0] AS usage
             RETURN rcname, sum(usage.amount) AS used
     """ % rp_uuid
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     return [{"resource_class": rec["rcname"], "usage": rec["used"]}
             for rec in result]
 
@@ -59,5 +59,5 @@ def _get_all_by_project_user(context, project_id, user_id=None):
             WITH labels(rc)[0] AS rcname, relationships(p)[-1] AS used
             RETURN rcname, sum(used.amount) AS usage
     """ % match
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     return {rec["rcname"]: rec["usage"] for rec in result}

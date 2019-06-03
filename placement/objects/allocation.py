@@ -45,7 +45,7 @@ class Allocation(object):
 
 
 @db_api.placement_context_manager.writer
-def _delete_allocations_for_consumer(ctx, consumer_uuid):
+def _delete_allocations_for_consumer(context, consumer_uuid):
     """Deletes any existing allocations that correspond to the allocations to
     be written. This is wrapped in a transaction, so if the write subsequently
     fails, the deletion will also be rolled back.
@@ -55,10 +55,10 @@ def _delete_allocations_for_consumer(ctx, consumer_uuid):
             WITH relationships(p)[0] AS usages
             DELETE usages
     """ % consumer_uuid
-    db.execute(query)
+    context.tx.run(query)
 
 
-def _check_capacity_exceeded(ctx, allocs):
+def _check_capacity_exceeded(context, allocs):
     """Checks to see if the supplied allocation records would result in any of
     the inventories involved having their capacity exceeded.
 
@@ -88,7 +88,7 @@ def _check_capacity_exceeded(ctx, allocs):
             WITH rp, rc, sum(allocs.amount) AS total_usages
             RETURN rp, rc, labels(rc)[0] AS rc_name, total_usages
     """ % (list(provider_uuids), list(rc_names))
-    result = db.execute(query)
+    result = context.tx.run(query).data()
 
     # Create a map keyed by (rp_uuid, res_class) for the records in the DB
     usage_map = {}
@@ -174,7 +174,7 @@ def _check_capacity_exceeded(ctx, allocs):
 
 
 @db_api.placement_context_manager.reader
-def _get_allocations_by_provider_uuid(ctx, rp_uuid):
+def _get_allocations_by_provider_uuid(context, rp_uuid):
     query = """
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
             WITH rp
@@ -186,7 +186,7 @@ def _get_allocations_by_provider_uuid(ctx, rp_uuid):
             MATCH (pj:PROJECT)-[:OWNS]->(user:USER)-[:OWNS]->(cs)
             RETURN rp, rc, rc_name, cs, usages, pj, user
     """ % rp_uuid
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     allocs = []
     for record in result:
         allocs.append({
@@ -201,7 +201,7 @@ def _get_allocations_by_provider_uuid(ctx, rp_uuid):
 
 
 @db_api.placement_context_manager.reader
-def _get_allocations_by_consumer_uuid(ctx, consumer_uuid):
+def _get_allocations_by_consumer_uuid(context, consumer_uuid):
     query = """
             MATCH p=(cs:CONSUMER {uuid: '%s'})-[:USES]->(rc)
             WITH cs, rc, labels(rc)[0] AS rc_name,
@@ -211,7 +211,7 @@ def _get_allocations_by_consumer_uuid(ctx, consumer_uuid):
             MATCH (rp:RESOURCE_PROVIDER)-[:PROVIDES]->(rc)
             RETURN rp, rc, rc_name, cs, usages, pj, user
     """ % consumer_uuid
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     allocs = []
     for record in result:
         pj_uuid = record["pj"].get("uuid") if record["pj"] else None
@@ -231,7 +231,7 @@ def _get_allocations_by_consumer_uuid(ctx, consumer_uuid):
 
 
 @db_api.placement_context_manager.writer.independent
-def _create_incomplete_consumers_for_provider(ctx, rp_id):
+def _create_incomplete_consumers_for_provider(context, rp_id):
     # TODO(jaypipes): Remove in Stein after a blocker migration is added.
     """Creates consumer record if consumer relationship between allocations ->
     consumers table is missing for any allocation on the supplied provider
@@ -245,7 +245,7 @@ def _create_incomplete_consumers_for_provider(ctx, rp_id):
 
 
 @db_api.placement_context_manager.writer.independent
-def _create_incomplete_consumer(ctx, consumer_id):
+def _create_incomplete_consumer(context, consumer_id):
     # TODO(jaypipes): Remove in Stein after a blocker migration is added.
     """Creates consumer record if consumer relationship between allocations ->
     consumers table is missing for the supplied consumer UUID, using the
@@ -326,7 +326,7 @@ def _set_allocations(context, allocs):
                 CREATE p=(cs)-[:USES {amount: %s}]->(rc)
                 RETURN p
         """ % (rp.uuid, rc_name, consumer_uuid, alloc.used)
-        result = db.execute(query)
+        result = context.tx.run(query)
 
     # Generation checking happens here. If the inventory for this resource
     # provider changed out from under us, this will raise a

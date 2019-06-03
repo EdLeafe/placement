@@ -18,26 +18,26 @@ from placement import exception
 
 
 @db_api.placement_context_manager.writer
-def ensure_incomplete_project(ctx):
+def ensure_incomplete_project(context):
     """Ensures that a project record is created for the "incomplete consumer
     project". Returns the internal ID of that record.
     """
-    incomplete_uuid = ctx.config.placement.incomplete_consumer_project_id
+    incomplete_uuid = context.config.placement.incomplete_consumer_project_id
     query = """
             MERGE (pj:PROJECT {uuid: '%s'})
             RETURN pj
     """ % incomplete_uuid
-    db.execute(query)
+    context.tx.run(query)
     return incomplete_uuid
 
 
 @db_api.placement_context_manager.reader
-def _get_project_by_uuid(ctx, uuid):
+def _get_project_by_uuid(context, uuid):
     query = """
             MATCH (pj:PROJECT {uuid: '%s'})
             RETURN pj
     """ % uuid
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     if not result:
         raise exception.ProjectNotFound(uuid=uuid)
     rec = db.pythonize(result[0]["pj"])
@@ -55,30 +55,30 @@ class Project(object):
         self.created_at = created_at
 
     @staticmethod
-    def _from_db_object(ctx, target, source):
-        target._context = ctx
+    def _from_db_object(context, target, source):
+        target._context = context
         target.uuid = source['uuid']
         target.updated_at = source['updated_at']
         target.created_at = source['created_at']
         return target
 
     @classmethod
-    def get_by_uuid(cls, ctx, uuid):
-        res = _get_project_by_uuid(ctx, uuid)
-        return cls._from_db_object(ctx, cls(ctx), res)
+    def get_by_uuid(cls, context, uuid):
+        res = _get_project_by_uuid(context, uuid)
+        return cls._from_db_object(context, cls(context), res)
 
     def create(self):
         @db_api.placement_context_manager.writer
-        def _create_in_db(ctx):
+        def _create_in_db(context):
             query = """
                     CREATE (pj:PROJECT {uuid: '%s', created_at: timestamp(),
                         updated_at: timestamp()})
                     RETURN pj
             """ % self.uuid
             try:
-                result = db.execute(query)
+                result = context.tx.run(query).data()
             except db.ClientError:
                 raise exception.ProjectExists(uuid=self.uuid)
             db_obj = db.pythonize(result[0]["pj"])
-            self._from_db_object(ctx, self, db_obj)
+            self._from_db_object(context, self, db_obj)
         _create_in_db(self._context)

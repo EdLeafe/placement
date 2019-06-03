@@ -67,7 +67,7 @@ class Trait(object):
         RETURN trait
         """ % upd_clause
         try:
-            result = db.execute(query)
+            result = context.tx.run(query).data()
         except db.ClientError as e:
             raise db_exc.DBDuplicateEntry(e)
         return db.pythonize(result[0]["trait"])
@@ -98,7 +98,7 @@ class Trait(object):
                 MATCH (trait:TRAIT {name: '%s'})
                 RETURN trait
         """ % name
-        result = db.execute(query)
+        result = context.tx.run(query).data()
         if not result:
             raise exception.TraitNotFound(names=name)
         trait = db.pythonize(result[0]["trait"])
@@ -110,12 +110,13 @@ class Trait(object):
         return cls(context, **db_trait)
 
     @classmethod
+    @db_api.placement_context_manager.reader
     def get_all_names(cls, context):
         query = """
                 MATCH (t:TRAIT)
                 RETURN t.name AS trait_name
         """
-        result = db.execute(query)
+        result = context.tx.run(query).data()
         trait_names = [rec["trait_name"] for rec in result]
         return trait_names
 
@@ -127,7 +128,7 @@ class Trait(object):
                 WHERE exists(rp.%s)
                 RETURN rp
         """ % name
-        result = db.execute(query)
+        result = context.tx.run(query).data()
         if result:
             raise exception.TraitInUse(name=name)
         query = """
@@ -136,7 +137,7 @@ class Trait(object):
                 DELETE t
                 RETURN t
         """ % name
-        result = db.execute(query)
+        result = context.tx.run(query).data()
         if not result:
             raise exception.TraitNotFound(names=name)
 
@@ -193,7 +194,7 @@ def get_traits_by_provider_uuid(context, rp_uuid):
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
             RETURN properties(rp) as props
     """ % rp_uuid
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     prop_dict = result[0]["props"] if result else {}
     props = list(prop_dict.keys())
     if not props:
@@ -208,14 +209,14 @@ def _traits_from_props(context, props):
 
 
 @db_api.placement_context_manager.reader
-def get_traits_by_provider_tree(ctx, root_uuids):
+def get_traits_by_provider_tree(context, root_uuids):
     """Returns a dict, keyed by provider UUIDs for all resource providers
     in all trees indicated in the ``root_uuids``, of string trait names
     associated with that provider.
 
     :raises: ValueError when root_uuids is empty.
 
-    :param ctx: placement.context.RequestContext object
+    :param context: placement.context.RequestContext object
     :param root_ids: list of root resource provider UUIDs
     """
     if not root_uuids:
@@ -229,7 +230,7 @@ def get_traits_by_provider_tree(ctx, root_uuids):
     """
     all_traits = collections.defaultdict(set)
     for root_uuid in root_uuids:
-        result = db.execute(query % root_uuid)
+        result = context.tx.run(query % root_uuid).data()
         if result:
             root_rp = db.pythonize(result[0]["root"])
             root_props = root_rp.keys()
@@ -284,27 +285,27 @@ def _get_all_from_db(context, filters):
             %(assoc)s
             RETURN trait
     """ % {"name_where": name_where, "assoc": assoc}
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     return [db.pythonize(rec["trait"]) for rec in result]
 
 
 # Bug #1760322: If the caller raises an exception, we don't want the trait
 # sync rolled back; so use an .independent transaction
-@db_api.placement_context_manager.writer
-def _trait_sync(ctx):
+@db_api.placement_context_manager.independent
+def _trait_sync(context):
     """Sync the os_traits symbols to the database.
 
     Reads all symbols from the os_traits library, checks if any of them do
     not exist in the database and bulk-inserts those that are not. This is
     done once per web-service process, at startup.
 
-    :param ctx: `placement.context.RequestContext` that may be used to grab a
-                 DB connection.
+    :param context: `placement.context.RequestContext` that may be used to grab
+                    a DB connection.
     """
     # Create a set of all traits in the os_traits library.
     std_traits = set(os_traits.get_traits())
     # Get the traits in the database
-    trait_names = Trait.get_all_names(ctx)
+    trait_names = Trait.get_all_names(context)
     db_traits = set(name for name in trait_names
             if not os_traits.is_custom(name))
     # Determine those traits which are in os_traits but not
@@ -312,13 +313,16 @@ def _trait_sync(ctx):
     need_sync = std_traits - db_traits
     if not need_sync:
         return
-    for trait_name in need_sync:
-        query = """
-                CREATE (t:TRAIT {name: '%s', created_at: timestamp(),
+    qlines = []
+    for num, trait_name in enumerate(need_sync):
+        qline = """
+                CREATE (t%s:TRAIT {name: '%s', created_at: timestamp(),
                     updated_at: timestamp()})
                 RETURN t
-        """ % trait_name
-        try:
-            result = db.execute(query)
-        except db.ClientError:
-            pass  # some other process sync'd, just ignore
+        """ % (num, trait_name)
+        qlines.append(qline)
+    query = "\n".join(qlines)
+    try:
+        result = context.tx.run(query).data()
+    except db.ClientError:
+        pass  # some other process sync'd, just ignore

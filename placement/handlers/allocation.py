@@ -509,7 +509,7 @@ def set_allocations(req):
     # and consumer generations (if applicable) check all in one go.
     allocations = create_allocation_list(context, data, consumers)
 
-    def _create_allocations(alloc_list):
+    def _create_allocations(context, alloc_list):
         try:
             alloc_obj.replace_all(context, alloc_list)
             LOG.debug("Successfully wrote allocations %s", alloc_list)
@@ -518,7 +518,7 @@ def set_allocations(req):
                 delete_consumers(new_consumers_created)
 
     try:
-        _create_allocations(allocations)
+        _create_allocations(context, allocations)
     except exception.NotFound as exc:
         raise webob.exc.HTTPBadRequest(
             "Unable to allocate inventory %(error)s" % {'error': exc})

@@ -37,12 +37,12 @@ def ensure_incomplete_user(ctx):
 
 
 @db_api.placement_context_manager.reader
-def _get_user_by_uuid(ctx, uuid):
+def _get_user_by_uuid(context, uuid):
     query = """
             MATCH (u:USER {uuid: '%s'})
             RETURN u
     """ % uuid
-    result = db.execute(query)
+    result = context.tx.run(query).data()
     if not result:
         raise exception.UserNotFound(uuid=uuid)
     rec = db.pythonize(result[0]["u"])
@@ -74,16 +74,16 @@ class User(object):
 
     def create(self):
         @db_api.placement_context_manager.writer
-        def _create_in_db(ctx):
+        def _create_in_db(context):
             query = """
                     CREATE (u:USER {uuid: '%s', created_at: timestamp(),
                         updated_at: timestamp()})
                     RETURN u
             """ % self.uuid
             try:
-                result = db.execute(query)
+                result = context.tx.run(query).data()
             except db.ClientError:
                 raise exception.UserExists(uuid=self.uuid)
             db_obj = db.pythonize(result[0]["u"])
-            self._from_db_object(ctx, self, db_obj)
+            self._from_db_object(context, self, db_obj)
         _create_in_db(self._context)
