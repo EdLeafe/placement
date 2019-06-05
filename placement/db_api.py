@@ -117,16 +117,39 @@ class TransactionContext():
             pass
         return reset
 
+    @staticmethod
+    def _context_tx_active(ctx):
+        if hasattr(ctx, "tx"):
+            tx = ctx.tx
+            if isinstance(tx, py2neo.Transaction):
+                return not tx.finished()
+        return False
+
     def __call__(self, fn):
         """Decorate a function."""
         argspec = inspect.getargspec(fn)
         context_index = 1 if argspec.args[0] in("self", "cls") else 0
+        cxn = db.get_connection()
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             context = args[context_index]
-            with self._transaction_scope(context):
-                return fn(*args, **kwargs)
+            with cxn.begin() as tx:
+#                print("BEGIN", id(tx), "Q", self.tx_queue.qsize())
+                if self._context_tx_active(context):
+                    self.tx_queue.put(context.tx)
+                context.tx = tx
+                try:
+                    ret = fn(*args, **kwargs)
+                except Exception as e:
+#                    print("EXC", id(tx), e)
+                    with excutils.save_and_reraise_exception():
+                        pass
+                finally:
+#                    print("END", id(tx), "Q", self.tx_queue.qsize())
+                    if self.tx_queue.qsize():
+                        context.tx = self.tx_queue.get()
+                return ret
         return wrapper
 
     @contextlib.contextmanager
@@ -134,7 +157,6 @@ class TransactionContext():
         cxn = db.get_connection()
         old_tx = context.tx if hasattr(context, "tx") else None
         tx = cxn.begin()
-        print("BEGIN", id(tx), self._mode)
         tx.pop = tx.success = False
         context.tx = tx
         if old_tx:
@@ -146,13 +168,16 @@ class TransactionContext():
             # Marking the transaction as successful will result in a COMMIT
             # when it is closed. When in read mode, we always want to rollback
             # any changes.
-            tx.success = (self._mode == "write") or self._independent
+            tx.success = True   #(self._mode == "write") or self._independent
         except Exception as e:
             with excutils.save_and_reraise_exception():
                 tx.success = False
         finally:
-            print("FINISH", id(tx), tx.success, self._mode)
-            tx.finish()
+            if not tx.finished():
+                if tx.success:
+                    tx.commit()
+                else:
+                    tx.rollback()
             # Pop the transaction from the queue, if any
             if tx.pop:
                 context.tx = context.tx_queue.get()
@@ -185,6 +210,5 @@ def get_placement_engine():
 class DbContext(TransactionContext):
     """Stub class for db session handling outside of web requests."""
     def __init__(self, *args, **kwargs):
-        print("STUB", args, kwargs)
         super(DbContext, self).__init__(*args, **kwargs)
         self._independent = True

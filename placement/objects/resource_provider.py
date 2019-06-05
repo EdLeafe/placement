@@ -666,12 +666,10 @@ class ResourceProvider(object):
 
     @property
     def root_provider_uuid(self):
-        print("rprov")
         return _root_provider_for_rp(self._context, self)
 
     @property
     def parent_provider_uuid(self):
-        print("pprov")
         return _parent_provider_for_rp(self._context, self)
 
     @parent_provider_uuid.setter

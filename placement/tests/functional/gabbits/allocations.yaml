@@ -154,7 +154,7 @@ tests:
   response_strings:
       - "Unable to delete resource provider $ENVIRON['RP_UUID']"
   response_json_paths:
-      errors[0].code: placement.resource_provider.inuse
+      errors[0].code: placement.inventory.inuse
 
 
 - name: put an allocation different consumer

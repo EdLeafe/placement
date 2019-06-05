@@ -58,6 +58,7 @@ class ResourceClass(object):
         return target
 
     @classmethod
+    @db_api.placement_context_manager.reader
     def get_by_name(cls, context, name):
         """Return a ResourceClass object with the given string name.
 

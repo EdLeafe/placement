@@ -379,6 +379,9 @@ def _set_allocations_for_consumer(req, schema):
     consumer_uuid = str(uuid.UUID(consumer_uuid))
     data = util.extract_json(req.body, schema)
     allocation_data = data['allocations']
+#    if "COWS" in allocation_data[0]["resources"]:
+#        import pudb
+#        pudb.set_trace()
 
     # Normalize allocation data to dict.
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]

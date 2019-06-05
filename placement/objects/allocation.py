@@ -44,6 +44,21 @@ class Allocation(object):
         self.created_at = created_at
 
 
+@db_api.placement_context_manager.reader
+def _list_allocations_for_consumer(context, consumer_uuid):
+    """Deletes any existing allocations that correspond to the allocations to
+    be written. This is wrapped in a transaction, so if the write subsequently
+    fails, the deletion will also be rolled back.
+    """
+    query = """
+            MATCH p=(:CONSUMER {uuid: '%s'})-[:USES]->()
+            WITH relationships(p)[0] AS usages
+            RETURN usages
+    """ % consumer_uuid
+    result = context.tx.run(query).data()
+    return [db.pythonize(rec["usages"]) for rec in result]
+
+
 @db_api.placement_context_manager.writer
 def _delete_allocations_for_consumer(context, consumer_uuid):
     """Deletes any existing allocations that correspond to the allocations to
@@ -77,18 +92,32 @@ def _check_capacity_exceeded(context, allocs):
     :param allocs: List of `Allocation` objects to check
     """
     rc_names = set([a.resource_class for a in allocs])
+    # Make sure that all the rc_names are valid
+    query = """
+            MATCH (rc:RESOURCE_CLASS)
+            WHERE rc.name IN {names}
+            RETURN rc.name AS rc_name
+    """
+    result = context.tx.run(query, names=list(rc_names))
+    db_names = set([rec["rc_name"] for rec in result])
+    set_bad_names = rc_names - db_names
+    if set_bad_names:
+        bad_names = ",".join(set_bad_names)
+        raise exception.ResourceClassNotFound(resource_class=bad_names)
+
     provider_uuids = set([a.resource_provider.uuid for a in allocs])
     query = """
             MATCH (rp:RESOURCE_PROVIDER)-[:PROVIDES]->(rc)
-            WHERE rp.uuid IN %s
-            AND labels(rc)[0] IN %s
+            WHERE rp.uuid IN {rp_uuids}
+            AND labels(rc)[0] IN {labels}
             WITH rp, rc
             OPTIONAL MATCH p=(cs:CONSUMER)-[:USES]->(rc)
             WITH rp, rc, relationships(p)[0] AS allocs
             WITH rp, rc, sum(allocs.amount) AS total_usages
             RETURN rp, rc, labels(rc)[0] AS rc_name, total_usages
-    """ % (list(provider_uuids), list(rc_names))
-    result = context.tx.run(query).data()
+    """
+    result = context.tx.run(query, rp_uuids=list(provider_uuids),
+            labels=list(rc_names)).data()
 
     # Create a map keyed by (rp_uuid, res_class) for the records in the DB
     usage_map = {}

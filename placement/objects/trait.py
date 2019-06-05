@@ -318,10 +318,10 @@ def _trait_sync(context):
         qline = """
                 CREATE (t%s:TRAIT {name: '%s', created_at: timestamp(),
                     updated_at: timestamp()})
-                RETURN t
         """ % (num, trait_name)
         qlines.append(qline)
-    query = "\n".join(qlines)
+    query = "\n".join(qlines) + "\nRETURN t0"
+
     try:
         result = context.tx.run(query).data()
     except db.ClientError:

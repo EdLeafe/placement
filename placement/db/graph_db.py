@@ -4,7 +4,7 @@ import os
 import six
 import uuid
 
-from py2neo import ClientError, Graph, Node, TransientError
+from py2neo import ClientError, DatabaseError, Graph, GraphError, Node, TransientError
 from neo4j import Transaction
 
 HOST = "notebook.leafe.com"
@@ -106,10 +106,27 @@ def execute(query, tx=None, autocommit=True):
     return crs.data()
 
 
+def remove_constraints(g):
+    schema = g.schema
+    labels = schema.node_labels
+    for label in labels:
+        try:
+            constraints = schema.get_uniqueness_constraints(label)
+        except ClientError as e:
+            continue
+        for constraint in constraints:
+            # Each constraint is a tuple
+            try:
+                schema.drop_uniqueness_constraint(label, *constraint)
+            except DatabaseError as e:
+                pass
+
+
 def delete_all():
     g = _connect()
     tx = begin_transaction(g=g, autocommit=False)
     g.delete_all()
+    remove_constraints(g)
     tx.commit()
 
 

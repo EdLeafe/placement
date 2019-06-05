@@ -151,6 +151,11 @@ def delete_resource_provider(req):
             'Unable to delete resource provider %(rp_uuid)s: %(error)s' %
             {'rp_uuid': uuid, 'error': exc},
             comment=errors.PROVIDER_IN_USE)
+    except exception.InventoryInUse as exc:
+        raise webob.exc.HTTPConflict(
+            'Unable to delete resource provider %(rp_uuid)s: %(error)s' %
+            {'rp_uuid': uuid, 'error': exc},
+            comment=errors.INVENTORY_INUSE)
     except exception.NotFound:
         raise webob.exc.HTTPNotFound(
             "No resource provider with uuid %s found for delete" % uuid)
