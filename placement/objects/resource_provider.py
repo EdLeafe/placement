@@ -10,7 +10,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import collections
 import copy
 
 # NOTE(cdent): The resource provider objects are designed to never be
@@ -19,7 +18,6 @@ import copy
 # not be registered and there is no need to express VERSIONs nor handle
 # obj_make_compatible.
 
-import os_traits
 from oslo_db import api as oslo_db_api
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
@@ -30,7 +28,7 @@ from placement.db import graph_db as db
 from placement import db_api
 from placement import exception
 from placement.objects import inventory as inv_obj
-from placement.objects import rp_candidates
+from placement.objects import research_context as res_ctx
 from placement.objects import trait as trait_obj
 from placement import resource_class_cache as rc_cache
 
@@ -556,7 +554,7 @@ def _set_root_provider_id(ctx, rp_id, root_id):
 
 
 @db_api.placement_context_manager.writer
-def set_root_provider_ids(ctx, batch_size):
+def set_root_provider_ids(context, batch_size):
     """Simply sets the root_provider_id value for a provider identified by
     rp_id. Used in explicit online data migration via CLI.
 

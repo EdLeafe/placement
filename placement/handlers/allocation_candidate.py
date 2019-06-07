@@ -280,7 +280,9 @@ def list_allocation_candidates(req):
     context.can(policies.LIST)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     get_schema = schema.GET_SCHEMA_1_10
-    if want_version.matches((1, 31)):
+    if want_version.matches((1, 33)):
+        get_schema = schema.GET_SCHEMA_1_33
+    elif want_version.matches((1, 31)):
         get_schema = schema.GET_SCHEMA_1_31
     elif want_version.matches((1, 25)):
         get_schema = schema.GET_SCHEMA_1_25
@@ -311,9 +313,13 @@ def list_allocation_candidates(req):
                 'The "group_policy" parameter is required when specifying '
                 'more than one "resources{N}" parameter.')
 
+    # We can't be aware of nested architecture with old microversions
+    nested_aware = want_version.matches((1, 29))
+
     try:
         cands = ac_obj.AllocationCandidates.get_by_requests(
-            context, requests, limit=limit, group_policy=group_policy)
+            context, requests, limit=limit, group_policy=group_policy,
+            nested_aware=nested_aware)
     except exception.ResourceClassNotFound as exc:
         raise webob.exc.HTTPBadRequest(
             'Invalid resource class in resources parameter: %(error)s' %
