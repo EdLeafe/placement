@@ -127,6 +127,12 @@ class TransactionContext():
 
     def __call__(self, fn):
         """Decorate a function."""
+
+        def _print(*args):
+            msg = " ".join([str(arg) for arg in args])
+            with open("OUT", "a") as ff:
+                ff.write("%s\n" % msg)
+
         argspec = inspect.getargspec(fn)
         context_index = 1 if argspec.args[0] in("self", "cls") else 0
         cxn = db.get_connection()
@@ -134,21 +140,22 @@ class TransactionContext():
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             context = args[context_index]
+            _print(str(fn), "CTX", id(context))
+            if self._context_tx_active(context):
+                _print("RESUING", id(context.tx), "CTX", id(context))
+                return fn(*args, **kwargs)
             with cxn.begin() as tx:
-#                print("BEGIN", id(tx), "Q", self.tx_queue.qsize())
-                if self._context_tx_active(context):
-                    self.tx_queue.put(context.tx)
+                _print("BEGIN", id(tx), "CTX", id(context))
                 context.tx = tx
                 try:
                     ret = fn(*args, **kwargs)
                 except Exception as e:
-#                    print("EXC", id(tx), e)
+                    _print("EXC", id(tx), e, "CTX", id(context))
                     with excutils.save_and_reraise_exception():
                         pass
                 finally:
-#                    print("END", id(tx), "Q", self.tx_queue.qsize())
-                    if self.tx_queue.qsize():
-                        context.tx = self.tx_queue.get()
+                    _print("END", id(tx), "CTX", id(context), tx.finished())
+                    pass
                 return ret
         return wrapper
 

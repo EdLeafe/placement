@@ -126,7 +126,7 @@ def delete_all():
     g = _connect()
     tx = begin_transaction(g=g, autocommit=False)
     g.delete_all()
-    remove_constraints(g)
+#    remove_constraints(g)
     tx.commit()
 
 
