@@ -18,7 +18,6 @@ import oslo_middleware
 from oslo_middleware import cors
 
 from placement import auth
-from placement.db.sqlalchemy import migration
 from placement import db_api
 from placement import fault_wrap
 from placement import handler
@@ -111,8 +110,6 @@ def update_database(conf):
     """Do any database updates required at process boot time, such as
     updating the traits table.
     """
-    if conf.placement_database.sync_on_startup:
-        migration.upgrade('head')
     ctx = db_api.DbContext()
     trait.ensure_sync(ctx)
     resource_class.ensure_sync(ctx)
