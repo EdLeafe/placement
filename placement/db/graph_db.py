@@ -7,9 +7,6 @@ import uuid
 from py2neo import ClientError, DatabaseError, Graph, GraphError, Node, TransientError
 from neo4j import Transaction
 
-HOST = "notebook.leafe.com"
-PASSWORD = "placement"
-
 _connection = None
 
 def get_connection():
@@ -76,9 +73,10 @@ def _connect():
     present, or 'localhost' if not.
     NOTE: This needs to be updated to use CONF settings
     """
-    host = HOST or os.getenv("NEO4J_HOST") or "localhost"
-    password = PASSWORD or os.getenv("NEO4J_PASSWORD") or "secret"
-    return Graph(host=host, password=password)
+    host = os.getenv("NEO4J_HOST") or "localhost"
+    user = os.getenv("NEO4J_USER") or "neo4j"
+    password = os.getenv("NEO4J_PASSWORD") or "neo4j"
+    return Graph(host=host, user=user, password=password)
 
 
 def begin_transaction(g=None, autocommit=False):
