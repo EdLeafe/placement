@@ -1171,6 +1171,7 @@ def _create_tree(ctx, tree, parent_uuid=None):
     atts.append("uuid: '{uuid}'".format(uuid=uuid))
     for trait in tree["traits"]:
         atts.append("{trait}: True".format(trait=trait))
+    atts.append("generation: 0")
     atts.append("created_at: timestamp()")
     atts.append("updated_at: timestamp()")
     atts_clause = ", ".join(atts)
