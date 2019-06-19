@@ -73,9 +73,9 @@ def _connect():
     present, or 'localhost' if not.
     NOTE: This needs to be updated to use CONF settings
     """
-    host = os.getenv("NEO4J_HOST") or "localhost"
-    user = os.getenv("NEO4J_USER") or "neo4j"
-    password = os.getenv("NEO4J_PASSWORD") or "neo4j"
+    host = os.getenv("DB_HOST") or "localhost"
+    user = os.getenv("DB_USER") or "neo4j"
+    password = os.getenv("DB_PASSWORD") or "placement"
     return Graph(host=host, user=user, password=password)
 
 
