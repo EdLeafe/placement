@@ -11,6 +11,7 @@
 #    under the License.
 from __future__ import absolute_import
 
+import json
 import os
 
 from gabbi import fixture
@@ -518,3 +519,96 @@ class OpenPolicyFixture(APIFixture):
 
     def stop_fixture(self):
         super(OpenPolicyFixture, self).stop_fixture()
+
+
+class TreeFixture(APIFixture):
+    """An APIFixture that creates the dictionaries for nested providers that
+    can be used for testing creating trees of nested providers.
+    """
+    def start_fixture(self):
+        super(TreeFixture, self).start_fixture()
+
+        pf_priv = {"name": "pfpriv1",
+                "type": "NIC",
+                "resources": [{"name": "VF",
+                        "total": 8,
+                        "reserved": 0,
+                        "min_unit": 1,
+                        "max_unit": 8,
+                        "step_size": 1,
+                        "allocation_ratio": 1
+                    }],
+                "traits": ["PRIVATE"]
+            }
+        pf_pub = {"name": "pfpub1",
+                "type": "NIC",
+                "resources": [{"name": "VF",
+                        "total": 8,
+                        "reserved": 0,
+                        "min_unit": 1,
+                        "max_unit": 8,
+                        "step_size": 1,
+                        "allocation_ratio": 1
+                    }],
+                "traits": ["PUBLIC"]
+            }
+        numa1 = {"name": "numanode1",
+                "type": "NUMA",
+                "resources": [{"name": "MEMORY_MB",
+                        "total": 8192,
+                        "reserved": 0,
+                        "min_unit": 128,
+                        "max_unit": 8192,
+                        "step_size": 128,
+                        "allocation_ratio": 1
+                    },
+                    {"name": "VCPU",
+                        "total": 4,
+                        "reserved": 0,
+                        "min_unit": 1,
+                        "max_unit": 4,
+                        "step_size": 1,
+                        "allocation_ratio": 16
+                    }],
+                "traits": [],
+                "children": [pf_priv, pf_pub]
+            }
+        numa2 = {"name": "numanode2",
+                "type": "NUMA",
+                "resources": [{"name": "MEMORY_MB",
+                        "total": 8192,
+                        "reserved": 0,
+                        "min_unit": 128,
+                        "max_unit": 8192,
+                        "step_size": 128,
+                        "allocation_ratio": 1
+                    },
+                    {"name": "VCPU",
+                        "total": 4,
+                        "reserved": 0,
+                        "min_unit": 1,
+                        "max_unit": 4,
+                        "step_size": 1,
+                        "allocation_ratio": 16
+                    }],
+                "traits": [],
+                "children": []
+            }
+        root = {"name": "node_with_numa",
+                "type": "ComputeNode",
+                "resources": [{"name": "DISK_GB",
+                        "total": 600,
+                        "reserved": 0,
+                        "min_unit": 10,
+                        "max_unit": 200,
+                        "step_size": 10,
+                        "allocation_ratio": 1
+                    }],
+                "traits": [],
+                "children": [numa1, numa2]
+            }
+
+        outfile = os.path.join(os.getcwd(), "placement", "tests", "functional",
+                "gabbits", "tree.json")
+        with open(outfile, "w") as ff:
+            json.dump(root, ff)

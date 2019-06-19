@@ -1,0 +1,16 @@
+fixtures:
+    - TreeFixture
+
+defaults:
+    request_headers:
+        x-auth-token: admin
+        accept: application/json
+
+tests:
+- name: create a simple tree
+  POST: /resource_tree
+  request_headers:
+    openstack-api-version: placement 1.32
+    content-type: application/json
+  data: <@tree.json
+  status: 200

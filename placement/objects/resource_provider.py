@@ -907,6 +907,26 @@ class ResourceProvider(object):
             setattr(resource_provider, field, db_resource_provider.get(field))
         return resource_provider
 
+    @classmethod
+    def create_tree(cls, ctx, tree):
+        """This method accepts a nested dict that describes a tree-like
+        relationship among resource providers. Each node on the tree should
+        contain the following keys:
+            name: the name given to the resource. If not supplied, no name is
+                set.
+            uuid: the resource's UUID. If not supplied, one will be generated.
+            resources: a dict of resources that this node provides directly.
+                Each member should be of the form `resource_class: amount`
+            traits: a list of traits to apply to this node.
+            children: a list of nodes representing the children of this node.
+                Each child node should be the same format dict as described
+                here.
+
+        There is no limit to the level of nesting for child resource providers.
+        """
+        rp_rec = _create_tree(ctx, tree)
+        return cls._from_db_object(ctx, cls(ctx), rp_rec)
+
 
 @db_api.placement_context_manager.reader
 def get_providers_with_shared_capacity(ctx, rc_name, amount, member_of=None):
@@ -1136,3 +1156,65 @@ def is_nested(ctx, rp1_uuid, rp2_uuid):
     """ % (rp1_uuid, rp2_uuid)
     result = ctx.tx.run(query).data()
     return bool(result)
+
+
+@db_api.placement_context_manager.writer
+def _create_tree(ctx, tree, parent_uuid=None):
+    atts = []
+    if "name" in tree:
+        nm = tree["name"]
+        atts.append("name: '{name}'".format(name=nm))
+    if "type" in tree:
+        tp = tree["type"]
+        atts.append("type: '{tp}'".format(tp=tp))
+    uuid = tree["uuid"] if "uuid" in tree else db.gen_uuid()
+    atts.append("uuid: '{uuid}'".format(uuid=uuid))
+    for trait in tree["traits"]:
+        atts.append("{trait}: True".format(trait=trait))
+    atts.append("created_at: timestamp()")
+    atts.append("updated_at: timestamp()")
+    atts_clause = ", ".join(atts)
+    
+    provides = []
+    for rsrc in tree["resources"]:
+        rc_name = rsrc.get("name")
+        total = rsrc.get("total")
+        reserved = rsrc.get("reserved", 0)
+        min_unit= rsrc.get("min_unit", 1)
+        max_unit = rsrc.get("max_unit", total)
+        step_size = rsrc.get("step_size", 1)
+        allocation_ratio = rsrc.get("allocation_ratio", 1)
+        prov_stmnt = """
+WITH nd
+CREATE (nd)-[:PROVIDES]->(:{rc_name}
+{{total: {total}, reserved: {reserved}, min_unit: {min_unit},
+max_unit: {max_unit}, allocation_ratio: {allocation_ratio},
+step_size: {step_size} }})""".format(rc_name=rc_name, total=total,
+        reserved=reserved, min_unit=min_unit, max_unit=max_unit,
+        allocation_ratio=allocation_ratio, step_size=step_size)
+        provides.append(prov_stmnt)
+
+    prov_clause = "\n".join(provides)
+    if parent_uuid:
+        query = """
+MATCH (parent:RESOURCE_PROVIDER {{ uuid: '{parent_uuid}' }})
+WITH parent
+CREATE (parent)-[:CONTAINS]->(nd:RESOURCE_PROVIDER {{ {atts_clause} }})
+{prov_clause}
+RETURN nd AS rp""".format(parent_uuid=parent_uuid,
+        atts_clause=atts_clause, prov_clause=prov_clause)
+    else:
+        # Primary node
+        query = """
+CREATE (nd:RESOURCE_PROVIDER {{ {atts_clause} }})
+{prov_clause}
+RETURN nd AS rp""".format(atts_clause=atts_clause,
+        prov_clause=prov_clause)
+
+    result = ctx.tx.run(query).data()
+    rp_rec = result[0]["rp"]
+    # Call recursively to add child nodes, if any
+    child_nodes = tree.get("children", [])
+    for child in child_nodes:
+        _create_tree(ctx, child, rp_rec["uuid"])
+    return rp_rec

@@ -13,6 +13,8 @@
 
 import copy
 
+from placement.schemas import inventory
+
 
 POST_RESOURCE_PROVIDER_SCHEMA = {
     "type": "object",
@@ -120,4 +122,61 @@ POST_RPS_ASSOCIATE = {
             }
         }
     }
+}
+
+# This contains the format for resources declared for a resource_provider when
+# creating a tree.
+resource_schema = copy.deepcopy(inventory.BASE_INVENTORY_SCHEMA)
+# We don't need generations when we create new providers
+del resource_schema["properties"]["resource_provider_generation"]
+resource_schema["required"].remove("resource_provider_generation")
+resource_schema["properties"]["name"] = {
+            "type": "string",
+            "maxLength": 255,
+        }
+resource_schema["required"].append("name")
+
+POST_RP_TREE = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "maxLength": 200
+        },
+        "uuid": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "type": {
+            "type": "string",
+            "maxLength": 200
+        },
+        "resources": {
+            "type": "array",
+            "minItems": 0,
+            "items": resource_schema
+        },
+        "traits": {
+            "type": "array",
+            "minItems": 0,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+            }
+        },
+        "children": {
+            "type": "array",
+            "minItems": 0,
+            "items": {
+                # This is a reflexive reference to this entire schema. All
+                # children have the same format as the parent.
+                "ref": "#"
+            }
+        }
+    },
+    "required": [
+        "name"
+    ],
+    "additionalProperties": False,
 }

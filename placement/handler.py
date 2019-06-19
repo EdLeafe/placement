@@ -102,6 +102,9 @@ ROUTE_DECLARATIONS = {
     '/resource_providers/{uuid}/associate': {
         'POST': resource_provider.associate,
     },
+    '/resource_tree': {
+        'POST': resource_provider.create_resource_tree
+    },
     '/allocations': {
         'POST': allocation.set_allocations,
     },

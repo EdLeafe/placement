@@ -326,7 +326,6 @@ def associate(req):
     schema = rp_schema.POST_RPS_ASSOCIATE
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     data = util.extract_json(req.body, schema)
-    target_uuids = data["targets"]
 
     # The containing application will catch a not found here.
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(context, uuid)
@@ -334,3 +333,36 @@ def associate(req):
 
     response = req.response
     response.status = 204
+
+
+@wsgi_wrapper.PlacementWsgify
+def create_resource_tree(req):
+    """This method accepts a nested dict that describes a tree-like
+    relationship among resource providers. Each node on the tree should contain
+    the following keys:
+        name: the name given to the resource. If not supplied, no name is set.
+        uuid: the resource's UUID. If not supplied, one will be generated.
+        resources: a dict of resources that this node provides directly. Each
+            member should be of the form `resource_class: amount`
+        traits: a list of traits to apply to this node.
+        children: a list of nodes representing the children of this node. Each
+            child node should be the same format dict as described here.
+
+        returns: the UUID of the root of the newly-created tree
+    There is no limit to the level of nesting for child resource providers.
+    """
+    context = req.environ["placement.context"]
+    context.can(policies.UPDATE)
+    schema = rp_schema.POST_RP_TREE
+    want_version = req.environ[microversion.MICROVERSION_ENVIRON]
+    data = util.extract_json(req.body, schema)
+    root_rp = rp_obj.ResourceProvider.create_tree(context, data)
+    
+    response = req.response
+    response.status = 200
+    req.response.location = util.resource_provider_url(req.environ, root_rp)
+    req.response.body = encodeutils.to_utf8(
+            jsonutils.dumps(
+            _serialize_provider(req.environ, root_rp, want_version)))
+    req.response.content_type = "application/json"
+    req.response.cache_control = "no-cache"
