@@ -106,7 +106,7 @@ class AllocationCandidates(object):
             # If there aren't any providers that have any of the
             # required traits, just exit early...
             if rg_ctx.required_traits:
-                # TODO(cdent): Now that there is also a forbidden_trait_map
+                # TODO(cdent): Now that there is also a forbidden_traits
                 # it should be possible to further optimize this attempt at
                 # a quick return, but we leave that to future patches for
                 # now.
@@ -303,7 +303,7 @@ def _alloc_candidates_multiple_providers(rg_ctx, rp_candidates):
     root_uuids = rp_candidates.all_rps
 
     # Grab usage summaries for each provider in the trees
-    usages = _get_usages_by_provider_tree(rg_ctx.context, root_ids)
+    usages = _get_usages_by_provider_tree(rg_ctx.context, root_uuids)
 
     # Get a dict, keyed by resource provider UUID, of trait string names
     # that provider has associated with it
@@ -359,8 +359,8 @@ def _alloc_candidates_multiple_providers(rg_ctx, rp_candidates):
         for res_requests in itertools.product(*request_groups):
             if not _check_traits_for_alloc_request(
                     res_requests, summaries,
-                    rg_ctx.required_trait_map,
-                    rg_ctx.forbidden_trait_map):
+                    rg_ctx.required_traits,
+                    rg_ctx.forbidden_traits):
                 # This combination doesn't satisfy trait constraints
                 continue
             root_alloc_reqs.add(
@@ -388,8 +388,8 @@ def _alloc_candidates_single_provider(rg_ctx, rp_tuples):
     determine requests across multiple providers.
 
     :param rg_ctx: RequestGroupSearchContext
-    :param rp_tuples: List of two-tuples of (provider ID, root provider ID)s
-                      for providers that matched the requested resources
+    :param rp_tuples: List of two-tuples of (provider UUID, root provider
+                      UUID)s for providers that matched the requested resources
     """
     if not rp_tuples:
         return [], []
@@ -414,7 +414,8 @@ def _alloc_candidates_single_provider(rg_ctx, rp_tuples):
     # resource class names and amounts to consume from that resource provider
     alloc_requests = []
     for rp_uuid, root_uuid in rp_tuples:
-        rp_summary = summaries[rp_uuid]
+#        rp_summary = summaries[rp_uuid]
+        rp_summary = summaries[root_uuid]
         req_obj = _allocation_request_for_provider(rg_ctx.context,
                 rg_ctx.resources, rp_summary.resource_provider)
         alloc_requests.append(req_obj)
@@ -516,11 +517,6 @@ def _build_provider_summaries(context, usages, prov_traits):
             # Let's skip the following and leave "ProviderSummary.resources"
             # field empty.
             continue
-        # NOTE(jaypipes): usage['used'] may be None due to the LEFT JOIN of
-        # the usages subquery, so we coerce NULL values to 0 here. It may
-        # also be a Decimal, as that's the type that mysql tends to return
-        # when func.sum is used in a query. We need an int, otherwise later
-        # JSON serialization will not work.
         used = int(usage["used"] or 0)
         allocation_ratio = usage["allocation_ratio"]
         cap = int((usage["total"] - usage["reserved"]) * allocation_ratio)
@@ -551,35 +547,33 @@ def _check_traits_for_alloc_request(res_requests, summaries, required_traits,
                       objects containing usage and trait information for
                       resource providers involved in the overall request
     """
-    all_prov_ids = []
+    all_prov_uuids = []
     all_traits = set()
     for res_req in res_requests:
         rp_uuid = res_req.resource_provider.uuid
-        for rp_id, summary in summaries.items():
-            if summary.resource_provider.uuid == rp_uuid:
-                break
-        rp_traits = set(prov_traits.get(rp_id, []))
+        rp_summary = summaries[rp_uuid]
+        rp_traits = set([trait.name for trait in rp_summary.traits])
 
         # Check if there are forbidden_traits
         conflict_traits = set(forbidden_traits) & set(rp_traits)
         if conflict_traits:
-            LOG.debug('Excluding resource provider %s, it has '
-                      'forbidden traits: (%s).',
-                      rp_id, ', '.join(conflict_traits))
+            LOG.debug("Excluding resource provider %s, it has "
+                      "forbidden traits: (%s).",
+                      rp_uuid, ", ".join(conflict_traits))
             return []
 
-        all_prov_ids.append(rp_id)
+        all_prov_uuids.append(rp_uuid)
         all_traits |= rp_traits
 
     # Check if there are missing traits
     missing_traits = set(required_traits) - all_traits
     if missing_traits:
-        LOG.debug('Excluding a set of allocation candidate %s : '
-                  'missing traits %s are not satisfied.',
-                  all_prov_ids, ','.join(missing_traits))
+        LOG.debug("Excluding a set of allocation candidate %s : "
+                  "missing traits %s are not satisfied.",
+                  all_prov_uuids, ",".join(missing_traits))
         return []
 
-    return all_prov_ids
+    return all_prov_uuids
 
 
 def _consolidate_allocation_requests(areqs):

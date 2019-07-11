@@ -168,6 +168,7 @@ class AllocationFixture(APIFixture):
         tb.add_inventory(rp, 'VCPU', 10, max_unit=10)
 
         # Create a first consumer for the DISK_GB allocations
+
         consumer1 = tb.ensure_consumer(self.context, user, project)
         tb.set_allocation(self.context, rp, consumer1, {'DISK_GB': 1000})
         os.environ['CONSUMER_0'] = consumer1.uuid
@@ -274,7 +275,7 @@ class SharedStorageFixture(APIFixture):
             # mark it shared among any provider associated via aggregate
             tb.add_inventory(shared, orc.DISK_GB, 2000,
                              reserved=100, allocation_ratio=1.0)
-#            tb.set_traits(shared, 'MISC_SHARES_VIA_AGGREGATE')
+            tb.set_traits(shared, 'MISC_SHARES_VIA_AGGREGATE')
             tb.set_sharing_among_agg(shared)
 
         # Populate PF inventory for VF

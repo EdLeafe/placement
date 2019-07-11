@@ -17,7 +17,9 @@ provider to another, such as when a class of inventory moves from a parent
 provider to a new child provider.
 """
 
+from collections import defaultdict
 import copy
+import itertools
 
 from oslo_utils import excutils
 import webob
@@ -47,6 +49,59 @@ def reshape(req):
     data = util.extract_json(req.body, schema.POST_RESHAPER_SCHEMA)
     inventories = data['inventories']
     allocations = data['allocations']
+
+    # Get the current inventory for all the RPs included. Compare it to the
+    # passed inventories; if they don't have the same resources, then something
+    # is off, and reject the reshape.
+    curr_resources = []
+    proposed_resources = []
+    for rp_uuid, inv_data in inventories.items():
+        curr_resources += list(rp_obj.get_current_inventory_resources(context,
+                rp_uuid, include_total=True))
+        for rc_name, rc_vals in inv_data["inventories"].items():
+            proposed_resources.append((rc_name, rc_vals["total"]))
+    curr_resources.sort()
+    proposed_resources.sort()
+    if not curr_resources == proposed_resources:
+        raise webob.exc.HTTPBadRequest("Proposed reshaped inventory does not "
+                "match existing inventory.")
+
+    # Now check the allocations to make sure that they match
+    curr_allocs = defaultdict(int)
+    proposed_allocs = defaultdict(int)
+
+    alloc_data = [itm["allocations"] for itm in allocations.values()]
+    # First, get all the unique RPs
+    rp_dict_keys = [itm.keys() for itm in alloc_data]
+    # Convert dict_keys data to lists
+    rp_lists = [list(itm) for itm in rp_dict_keys]
+    # Collapse the lists of lists to a single list, and get the unique values
+    rp_set = set(list(itertools.chain(*rp_lists)))
+    # Get the current allocations for each RP
+    for rp in rp_set:
+        alloc_dict = rp_obj.get_allocated_inventory(context, rp)
+        for key, val in alloc_dict.items():
+            curr_allocs[key] += val
+    # Now sum up the proposed allocations. The RC name and amount are in a
+    # deeply-nested dict.
+    for rdict in alloc_data:
+        for _, rsrc in rdict.items():
+            for _, rc in rsrc.items():
+                for rc_name, amt in rc.items():
+                    proposed_allocs[rc_name] += amt
+
+    if not curr_allocs == proposed_allocs:
+        raise webob.HTTPBadRequest("Proposed reshaped allocations do not "
+                "match existing allocations.")
+
+    # The inventories and allocations match up, so now just switch the
+    # connections among the entities.
+    rp_obj.reshape(context, inventories, allocations)
+    # ^^^ This needs to be written
+
+
+
+
     # We're going to create several lists of Inventory objects, keyed by rp
     # uuid.
     inventory_by_rp = {}

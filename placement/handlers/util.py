@@ -24,7 +24,7 @@ from placement.objects import user as user_obj
 LOG = logging.getLogger(__name__)
 
 
-def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
+def ensure_consumer(ctx, consumer_uuid, project_uuid, user_uuid,
                     consumer_generation, want_version):
     """Ensures there are records in the consumers, projects and users table for
     the supplied external identifiers.
@@ -40,8 +40,8 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
 
     :param ctx: The request context.
     :param consumer_uuid: The uuid of the consumer of the resources.
-    :param project_id: The external ID of the project consuming the resources.
-    :param user_id: The external ID of the user consuming the resources.
+    :param project_uuid: The external ID of the project consuming the resources.
+    :param user_uuid: The external ID of the user consuming the resources.
     :param consumer_generation: The generation provided by the user for this
         consumer.
     :param want_version: the microversion matcher.
@@ -50,29 +50,29 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
     """
     created_new_consumer = False
     requires_consumer_generation = want_version.matches((1, 28))
-    if project_id is None:
-        project_id = ctx.config.placement.incomplete_consumer_project_id
-        user_id = ctx.config.placement.incomplete_consumer_user_id
+    if project_uuid is None:
+        project_uuid = ctx.config.placement.incomplete_consumer_project_id
+        user_uuid = ctx.config.placement.incomplete_consumer_user_id
     try:
-        proj = project_obj.Project.get_by_uuid(ctx, project_id)
+        proj = project_obj.Project.get_by_uuid(ctx, project_uuid)
     except exception.NotFound:
         # Auto-create the project if we found no record of it...
         try:
-            proj = project_obj.Project(ctx, uuid=project_id)
+            proj = project_obj.Project(ctx, uuid=project_uuid)
             proj.create()
         except exception.ProjectExists:
             # No worries, another thread created this project already
-            proj = project_obj.Project.get_by_uuid(ctx, project_id)
+            proj = project_obj.Project.get_by_uuid(ctx, project_uuid)
     try:
-        user = user_obj.User.get_by_uuid(ctx, user_id)
+        user = user_obj.User.get_by_uuid(ctx, user_uuid)
     except exception.NotFound:
         # Auto-create the user if we found no record of it...
         try:
-            user = user_obj.User(ctx, uuid=user_id)
+            user = user_obj.User(ctx, uuid=user_uuid)
             user.create()
         except exception.UserExists:
             # No worries, another thread created this user already
-            user = user_obj.User.get_by_uuid(ctx, user_id)
+            user = user_obj.User.get_by_uuid(ctx, user_uuid)
 
     try:
         consumer = consumer_obj.Consumer.get_by_uuid(ctx, consumer_uuid)
@@ -109,8 +109,8 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
         # same transaction context is used for both util.ensure_consumer() and
         # AllocationList.replace_all() within the same HTTP request, but need
         # to test this to be 100% certain...
-        if (project_id != consumer.project.uuid or
-                user_id != consumer.user.uuid):
+        if (project_uuid != consumer.project.uuid or
+                user_uuid != consumer.user.uuid):
             LOG.debug("Supplied project or user ID for consumer %s was "
                       "different than existing record. Updating consumer "
                       "record.", consumer_uuid)
@@ -139,4 +139,7 @@ def ensure_consumer(ctx, consumer_uuid, project_id, user_id,
         except exception.ConsumerExists:
             # No worries, another thread created this user already
             consumer = consumer_obj.Consumer.get_by_uuid(ctx, consumer_uuid)
+    # Make sure they are related
+    consumer_obj.relate_project_and_user(ctx, project_uuid, user_uuid,
+            consumer_uuid)
     return consumer, created_new_consumer

@@ -581,7 +581,7 @@ tests:
   GET: /resource_providers?required=STORAGE_DISK_SSD,BOGUS_TRAIT,MISC_SHARES_VIA_AGGREGATE
   status: 400
   response_strings:
-      - "No such trait(s): BOGUS_TRAIT."
+      - "Invalid trait(s) in request: BOGUS_TRAIT"
   response_json_paths:
       $.errors[0].title: Bad Request
 

@@ -116,6 +116,11 @@ def create_resource_provider(req):
             raise webob.exc.HTTPBadRequest("Unable to create resource "
                     "provider '%(rp_uuid)s': %(error)s" %
                     {"rp_uuid": data.get("uuid"), "error": e})
+    except exception.ObjectActionError as exc:
+        raise webob.exc.HTTPBadRequest(
+            'Unable to create resource provider "%(name)s", %(rp_uuid)s: '
+            '%(error)s' %
+            {'name': data['name'], 'rp_uuid': data['uuid'], 'error': exc})
 
     req.response.location = util.resource_provider_url(
         req.environ, resource_provider)
@@ -248,8 +253,7 @@ def list_resource_providers(req):
             {'error': exc})
     except exception.TraitNotFound as exc:
         raise webob.exc.HTTPBadRequest(
-            'Invalid trait(s) in "required" parameter: %(error)s' %
-            {'error': exc})
+            'Invalid trait(s) in request: %(error)s' % {'error': exc})
 
     response = req.response
     output, last_modified = _serialize_providers(
@@ -291,6 +295,12 @@ def update_resource_provider(req):
 
     try:
         resource_provider.save()
+    except db.ClientError as e:
+        if "ConstraintValidationFailed" in e.message:
+            raise webob.exc.HTTPConflict(
+                'Conflicting resource provider %(name)s already exists.' %
+                {'name': data['name']},
+                comment=errors.DUPLICATE_NAME)
     except db_exc.DBDuplicateEntry:
         raise webob.exc.HTTPConflict(
             'Conflicting resource provider %(name)s already exists.' %
@@ -326,6 +336,7 @@ def associate(req):
     schema = rp_schema.POST_RPS_ASSOCIATE
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     data = util.extract_json(req.body, schema)
+    target_uuids = data.get("targets", [])
 
     # The containing application will catch a not found here.
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(context, uuid)

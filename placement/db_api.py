@@ -133,7 +133,7 @@ class TransactionContext():
             with open("OUT", "a") as ff:
                 ff.write("%s\n" % msg)
 
-        argspec = inspect.getargspec(fn)
+        argspec = inspect.getfullargspec(fn)
         context_index = 1 if argspec.args[0] in("self", "cls") else 0
         cxn = db.get_connection()
 

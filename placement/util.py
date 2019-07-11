@@ -12,6 +12,7 @@
 """Utility methods for placement API."""
 
 import functools
+import six
 
 import jsonschema
 from oslo_log import log as logging
@@ -433,6 +434,18 @@ def normalize_in_tree_qs_params(value):
                "Got: %(val)s") % {'val': value}
         raise webob.exc.HTTPBadRequest(msg)
     return ret
+
+
+def makelist(val):
+    """Values are sometimes passed into the various functions as either a
+    string UUID, a list of UUIDs, or a set of UUIDs. When creating queries that
+    use the IN operator, we always need the UUIDs to be a list, so this
+    function ensures that."""
+    if isinstance(val, set):
+        return list(val)
+    elif isinstance(val, six.string_types):
+        return [val]
+    return val
 
 
 def run_once(message, logger, cleanup=None):

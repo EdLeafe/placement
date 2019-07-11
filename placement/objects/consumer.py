@@ -11,6 +11,7 @@
 #    under the License.
 
 from oslo_db import exception as db_exc
+from oslo_utils import timeutils
 
 from placement.db import graph_db as db
 from placement import db_api
@@ -113,6 +114,60 @@ def _delete_consumer(ctx, consumer):
     ctx.tx.run(query)
 
 
+@db_api.placement_context_manager.writer
+def relate_project_and_user(ctx, project_uuid, user_uuid, consumer_uuid):
+    """After the project, user, and consumer are established for an
+    allocation, make sure that the relationships between them are set.
+    """
+    # First, remove any existing relationships if they aren't the same
+    query = """
+            MATCH pth_user=(pj)-[:OWNS]->(us:USER {uuid: '%s'})
+            RETURN pj.uuid AS own_uuid
+            UNION
+            MATCH pth_cons=(us)-[:OWNS]->(co:CONSUMER {uuid: '%s'})
+            RETURN us.uuid AS own_uuid
+            """ % (user_uuid, consumer_uuid)
+    result = ctx.tx.run(query).data()
+    owners = [rec["own_uuid"] for rec in result]
+    if owners == [project_uuid, user_uuid]:
+        # Everything's already related
+        return
+    if owners:
+        # Delete any :OWNS relationships to the user and consumers if they
+        # don't match the desired relationships.
+        query = """
+                MATCH (us:USER {uuid: '%s'})
+                WITH us
+                MATCH pth_u=(pj:PROJECT)-[:OWNS]-(us)
+                WHERE pj.uuid <> '%s'
+                WITH relationships(pth_u) AS urels
+                UNWIND urels AS urel
+                DELETE urel
+        """ % (user_uuid, project_uuid)
+        result = ctx.tx.run(query).data()
+        query = """
+                MATCH (co:CONSUMER {uuid: '%s'})
+                WITH co
+                MATCH pth_c=(us:USER)-[:OWNS]-(co)
+                WHERE us.uuid <> '%s'
+                WITH relationships(pth_c) AS crels
+                UNWIND crels AS crel
+                DELETE crel
+        """ % (consumer_uuid, user_uuid)
+        result = ctx.tx.run(query).data()
+    # Now create the relationships
+    query = """
+            MATCH (pj:PROJECT {uuid: '%s'})
+            MATCH (us:USER {uuid: '%s'})
+            MATCH (co:CONSUMER {uuid: '%s'})
+            WITH pj, us, co
+            MERGE (pj)-[:OWNS]->(us)
+            MERGE (us)-[:OWNS]->(co)
+            RETURN pj, us, co
+    """ % (project_uuid, user_uuid, consumer_uuid)
+    ctx.tx.run(query).data()
+
+
 class Consumer(object):
 
     def __init__(self, context, uuid=None, project=None, user=None,
@@ -145,10 +200,13 @@ class Consumer(object):
     def create(self):
         @db_api.placement_context_manager.writer
         def _create_in_db(ctx, gen):
+            creat = self.created_at if self.created_at else "timestamp()"
+            updt = self.updated_at if self.updated_at else "timestamp()"
             query = """
-                    MERGE (cs:CONSUMER {uuid: '%s', generation: %s})
+                    MERGE (cs:CONSUMER {uuid: '%s', generation: %s,
+                        created_at: %s, updated_at: %s})
                     RETURN cs
-            """ % (self.uuid, gen)
+            """ % (self.uuid, gen, creat, updt)
             ctx.tx.run(query)
         gen = self.generation or 0
         _create_in_db(self._context, gen)

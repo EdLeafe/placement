@@ -32,27 +32,35 @@ from placement.objects import inventory as inv_obj
 from placement.objects import research_context as res_ctx
 from placement.objects import trait as trait_obj
 from placement import resource_class_cache as rc_cache
+from placement import util
 
 
 LOG = logging.getLogger(__name__)
 
 
-def _get_current_inventory_resources(ctx, rp):
+@db_api.placement_context_manager.writer
+def get_current_inventory_resources(ctx, rp, include_total=False):
     """Returns a set() containing the names of the resource classes for all
     resources currently having an inventory record for the supplied resource
-    provider.
+    provider. If 'include_total' is True, the set will contain (rc_name, total)
+    tuples instead of just the rc_name.
 
     :param ctx: `placement.context.RequestContext` that may be used to grab a
                 DB connection.
     :param rp: Resource provider to query inventory for.
+    :param include_total: Determines if we return (rc_name, total) tuples
+                          (True), or just the rc_names.
     """
     rp_uuid = rp if isinstance(rp, six.string_types) else rp.uuid
     query = """
             MATCH (rp {uuid: '%s'})-[:PROVIDES]->(rc)
-            RETURN labels(rc)[0] AS rc_name
+            RETURN labels(rc)[0] AS rc_name, rc.total as rc_total
     """ % rp_uuid
     result = ctx.tx.run(query).data()
-    resources = [rec["rc_name"] for rec in result]
+    if include_total:
+        resources = [(rec["rc_name"], rec["rc_total"]) for rec in result]
+    else:
+        resources = [rec["rc_name"] for rec in result]
     return set(resources)
 
 
@@ -77,6 +85,7 @@ def has_allocations(ctx, rp, rcs=None):
     return True
 
 
+@db_api.placement_context_manager.reader
 def get_allocated_inventory(ctx, rp, rcs=None):
     """Returns the list of resource classes for any inventory that has
     allocations against it, along with the total amount allocated. If `rcs` is
@@ -121,7 +130,7 @@ def _delete_inventory_from_provider(ctx, rp, to_delete=None):
         raise exception.InventoryInUse(resource_classes=alloc_keys,
                                        resource_provider=rp_uuid)
     if to_delete is None:
-        to_delete = _get_current_inventory_resources(ctx, rp_uuid)
+        to_delete = get_current_inventory_resources(ctx, rp_uuid)
     for rc in to_delete:
         # Delete the providing relationship first
         query = """
@@ -207,7 +216,7 @@ def _update_inventory_for_provider(ctx, rp, inv_list, to_update):
                 MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-->(rc:%s)
                 RETURN id(rc) as rcid
         """ % (rp.uuid, rc)
-        result = ctx.tx.run(query)
+        result = ctx.tx.run(query).data()
         if not result:
             raise exception.InventoryWithResourceClassNotFound(
                 resource_class=rc)
@@ -298,7 +307,7 @@ def _set_inventory(ctx, rp, inv_list):
     :raises `exception.InventoryInUse` if we attempt to delete inventory
             from a provider that has allocations for that resource class.
     """
-    existing_resources = _get_current_inventory_resources(ctx, rp)
+    existing_resources = get_current_inventory_resources(ctx, rp)
     these_resources = set([r.resource_class for r in inv_list])
 
     # Determine which resources we should be adding, deleting and/or
@@ -381,21 +390,28 @@ def _ensure_aggregate(ctx, agg_uuid):
     return agg_uuid
 
 
+@db_api.placement_context_manager.writer
 def associate(ctx, resource_provider, rp_uuids):
     """Associates one or more resource providers with the specified resource
     provider. Note that the relationship is from RP to shared entity, as this
     is needed for resolving :PROVIDES relationships; e.g.:
         (rp)-[:ASSOCIATED]->(share)-[:PROVIDES]->(resource)
     """
+    # Make sure that the UUID of the resource_provider is not duplicated in the
+    # rp_uuids. We don't want to associate an RP with itself!
+    if resource_provider.uuid in rp_uuids:
+        rp_uuids.remove(resource_provider.uuid)
     query = """
-            MATCH (share:RESOURCE_PROVIDER {uuid: '%s'})
+            MATCH (share:RESOURCE_PROVIDER {{ uuid: '{rp_uuid}' }})
             WITH share
             MATCH (rp:RESOURCE_PROVIDER)
-            WHERE rp.uuid IN %s
+            WHERE rp.uuid IN {rp_list}
             WITH share, rp
             MERGE (rp)-[:ASSOCIATED]->(share)
-            RETURN share
-    """ % (resource_provider.uuid, rp_uuids)
+            WITH rp, share
+            WHERE rp <> share
+            RETURN share""".format(rp_uuid=resource_provider.uuid,
+                    rp_list=util.makelist(rp_uuids))
     result = ctx.tx.run(query).data()
 
 @db_api.placement_context_manager.writer
@@ -426,8 +442,10 @@ def _set_aggregates(ctx, resource_provider, provided_aggregates,
         create_clause = "\n".join(creates)
         agg_withs = ", ".join(["agg%s" % num
             for num in range(len(aggs_to_associate))])
-        assoc_lines = ["MERGE (rp)-[:ASSOCIATED]->(agg%s)" % num
-            for num in range(len(aggs_to_associate))]
+        assoc_lines = ["MERGE (rp)-[:ASSOCIATED]->(agg{num}) "
+                "WITH rp, {agg_withs} WHERE rp <> agg{num}".format(
+                    num=num, agg_withs=agg_withs)
+                for num in range(len(aggs_to_associate))]
         assoc_clause = "\n".join(assoc_lines)
         query = """
                 MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})
@@ -448,9 +466,9 @@ def _set_aggregates(ctx, resource_provider, provided_aggregates,
                 DELETE a
         """ % (resource_provider.uuid, aggs_to_disassociate)
         result = ctx.tx.run(query).data()
-        if increment_generation:
-            resource_provider.increment_generation()
-        return
+    if increment_generation:
+        resource_provider.increment_generation()
+    return
 
 
 @db_api.placement_context_manager.writer
@@ -549,15 +567,16 @@ def set_root_provider_ids(context, batch_size):
 class ResourceProvider(object):
     SETTABLE_FIELDS = ('name', 'parent_provider_uuid')
 
-    def __init__(self, ctx, uuid=None, name=None,
-                 generation=None, parent_provider_uuid=None, updated_at=None,
-                 created_at=None):
+    def __init__(self, ctx, uuid=None, name=None, generation=None,
+            parent_provider_uuid=None, updated_at=None, created_at=None,
+            provider_type=None, **kwargs):
         self._context = ctx
         self.uuid = uuid
         self.name = name
         self.generation = generation
         self.updated_at = updated_at
         self.created_at = created_at
+        self.provider_type = provider_type
         # Hold this for setting relationships at create() time.
         self._parent_provider_uuid = parent_provider_uuid
 
@@ -759,7 +778,10 @@ class ResourceProvider(object):
 
         # Delete any inventory associated with the resource provider. This will
         # fail if the inventory has any allocations against it.
-        _delete_inventory_from_provider(ctx, uuid)
+        try:
+            _delete_inventory_from_provider(ctx, uuid)
+        except exception.InventoryInUse:
+            raise exception.ResourceProviderInUse()
         query = """
                 MATCH p=(me:RESOURCE_PROVIDER {uuid: '%s'})-[:PROVIDES]->(inv)
                 WITH me, inv, last(relationships(p)) AS provisions
@@ -803,9 +825,8 @@ class ResourceProvider(object):
             # * potentially orphaning heretofore-descendants
             #
             # So, for now, let's just prevent re-parenting...
-            my_ids = provider_uuids_from_uuid(ctx, self.uuid)
-            curr_parent_uuid = my_ids.parent_uuid if my_ids else None
             parent_uuid = updates.get("parent_provider_uuid")
+            curr_parent_uuid = self.parent_provider_uuid
             if parent_uuid is not None:
                 if (curr_parent_uuid is not None and
                         (curr_parent_uuid != parent_uuid)):
@@ -922,7 +943,10 @@ class ResourceProvider(object):
                 Each child node should be the same format dict as described
                 here.
 
-        There is no limit to the level of nesting for child resource providers.
+        The root provider of the newly-created tree is returned.
+
+        Note: There is no limit to the level of nesting for child resource
+        providers.
         """
         rp_rec = _create_tree(ctx, tree)
         return cls._from_db_object(ctx, cls(ctx), rp_rec)
@@ -1047,9 +1071,12 @@ def _get_all_by_filters_from_db(ctx, filters):
         query_lines.append("WITH rp")
 
     if resources:
+        # This will raise a 'ResourceClassNotFound' exception if any resource
+        # classes are not valid names. 
+        res_ctx.validate_resources(ctx, list(resources.keys()))
         rps_with_rsrcs = []
         for rc_name, amount in resources.items():
-            rps = get_providers_with_resource(ctx, rc_name, amount)
+            rps = res_ctx.get_providers_with_resource(ctx, rc_name, amount)
             rps_with_rsrcs.append(set([rp[0] for rp in rps]))
         good_rps = rps_with_rsrcs[0]
         for rsrc_set in rps_with_rsrcs[1:]:
@@ -1060,21 +1087,28 @@ def _get_all_by_filters_from_db(ctx, filters):
         query_lines.append("WITH rp")
 
     if member_of:
-        for agg in member_of:
-            query_lines.append("MATCH (rp)-[:ASSOCIATED]->(agg)")
-            query_lines.append("WHERE agg.uuid IN %s" % agg)
+        for num, agg in enumerate(member_of):
+            query_lines.append("MATCH (rp)-[:ASSOCIATED]->(agg{num})".format(
+                    num=num))
+            query_lines.append("WHERE agg{num}.uuid IN {agglist}".format(
+                    num=num, agglist=util.makelist(agg)))
         query_lines.append("WITH rp")
     if forbidden_aggs:
         for agg in forbidden_aggs:
-            query_lines.append("MATCH (rp)-[:ASSOCIATED]->(agg)")
-            query_lines.append("WHERE agg.uuid NOT IN %s" % agg)
-        query_lines.append("WITH rp")
-
+            query_lines.append("MATCH (badagg:AGGREGATE)")
+            query_lines.append("WHERE badagg.uuid in {agg}".format(agg=util.makelist(agg)))
+            query_lines.append("WITH rp, badagg")
+            query_lines.append("WHERE NOT EXISTS( (rp)-[:ASSOCIATED]->(badagg) )")
+            query_lines.append("WITH rp")
     trait_filters = []
+    # This will raise a 'TraitNotFound' exception if any required or forbidden
+    # traits are specified. These values are passed in as sets.
+    all_traits = required | forbidden
+    res_ctx.validate_traits(ctx, all_traits)
     for trait in required:
-        trait_filters.append("EXISTS rp.%s" % trait)
+        trait_filters.append("EXISTS(rp.%s)" % trait)
     for trait in forbidden:
-        trait_filters.append("NOT EXISTS rp.%s" % trait)
+        trait_filters.append("NOT EXISTS(rp.%s)" % trait)
     trait_str = " AND ".join(trait_filters)
     if trait_str:
         query_lines.append("WHERE %s" % trait_str)
@@ -1146,6 +1180,7 @@ def _root_provider_for_rp(ctx, rp):
         return rp_uuid
 
 
+@db_api.placement_context_manager.reader
 def is_nested(ctx, rp1_uuid, rp2_uuid):
     """Returns True if the two resource providers are related with a :CONTAINS
     relationship. The direction of the relationship doesn't matter.
@@ -1166,7 +1201,7 @@ def _create_tree(ctx, tree, parent_uuid=None):
         atts.append("name: '{name}'".format(name=nm))
     if "type" in tree:
         tp = tree["type"]
-        atts.append("type: '{tp}'".format(tp=tp))
+        atts.append("provider_type: '{tp}'".format(tp=tp))
     uuid = tree["uuid"] if "uuid" in tree else db.gen_uuid()
     atts.append("uuid: '{uuid}'".format(uuid=uuid))
     for trait in tree["traits"]:

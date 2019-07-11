@@ -57,7 +57,8 @@ def _get_all_by_project_user(context, project_id, user_id=None):
     query = """
             %s
             WITH labels(rc)[0] AS rcname, relationships(p)[-1] AS used
-            RETURN rcname, sum(used.amount) AS usage
+            RETURN rcname, sum(used.amount) AS used
     """ % match
     result = context.tx.run(query).data()
-    return {rec["rcname"]: rec["usage"] for rec in result}
+    return [{"resource_class": rec["rcname"], "usage": rec["used"]}
+            for rec in result]

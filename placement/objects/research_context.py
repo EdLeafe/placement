@@ -16,15 +16,35 @@ import os_traits
 from oslo_log import log as logging
 import sqlalchemy as sa
 
+from placement.db import graph_db as db
 from placement import db_api
 from placement import exception
 from placement.objects import rp_candidates
 from placement.objects import trait as trait_obj
 from placement import resource_class_cache as rc_cache
+from placement import util
 
 
 LOG = logging.getLogger(__name__)
 
+QUERY_TEMPLATE = """
+MATCH (root:RESOURCE_PROVIDER)-[*0..99]->
+    (rp:RESOURCE_PROVIDER)-[:PROVIDES]->(rc{num}:{rc_name})
+WITH root, rp, rc{num}, ((rc{num}.total - rc{num}.reserved) *
+	 rc{num}.allocation_ratio) AS capacity
+OPTIONAL MATCH par=(parent:RESOURCE_PROVIDER)- [:CONTAINS|ASSOCIATED*]->(root)
+WITH root, size(relationships(par)) AS numrel, rp, rc{num}, capacity
+OPTIONAL MATCH p=(:CONSUMER)-[:USES]->(rc{num})
+WITH root, numrel, rp, rc{num}, capacity, last(relationships(p)) AS uses
+WITH root, numrel, rp, rc{num}, capacity - sum(uses.amount) AS avail
+WHERE avail >= {amount}
+AND rc{num}.min_unit <= {amount}
+AND rc{num}.max_unit >= {amount}
+AND {amount} % rc{num}.step_size = 0
+AND numrel IS null
+RETURN rp.uuid AS rp_uuid, root.uuid AS root_uuid,
+    labels(rc{num})[0] AS rc_name
+"""
 
 ProviderIds = collections.namedtuple("ProviderIds",
         "uuid parent_uuid root_uuid")
@@ -59,6 +79,7 @@ class RequestGroupSearchContext(object):
         # A set of provider ids that matches the requested positive aggregates
         self.rps_in_aggs = set()
         if self.member_of:
+            x = request.resources
             self.rps_in_aggs = provider_ids_matching_aggregates(
                 context, self.member_of)
             if not self.rps_in_aggs:
@@ -71,22 +92,17 @@ class RequestGroupSearchContext(object):
         self.use_same_provider = request.use_same_provider
 
         # maps the trait name to the trait internal ID
-        self.required_trait_map = {}
-        self.forbidden_trait_map = {}
-        for trait_map, traits in (
-                (self.required_trait_map, request.required_traits),
-                (self.forbidden_trait_map, request.forbidden_traits)):
-            if traits:
-                trait_map.update(trait_obj.ids_from_names(context, traits))
+        self.required_traits = request.required_traits
+        self.forbidden_traits = request.forbidden_traits
 
         # Internal id of a root provider. If provided, this RequestGroup must
         # be satisfied by resource provider(s) under the root provider.
-        self.tree_root_id = None
+        self.tree_root_uuid = None
         if request.in_tree:
-            tree_ids = provider_ids_from_uuid(context, request.in_tree)
+            tree_ids = provider_uuids_from_uuid(context, request.in_tree)
             if tree_ids is None:
                 raise exception.ResourceProviderNotFound()
-            self.tree_root_id = tree_ids.root_id
+            self.tree_root_uuid = tree_ids.root_uuid
             LOG.debug("getting allocation candidates in the same tree "
                       "with the root provider %s", tree_ids.root_uuid)
 
@@ -98,7 +114,7 @@ class RequestGroupSearchContext(object):
             # flows down feature) rather than applying later the implicit rule
             # that aggregate on root spans the whole tree
             provs_with_resource = get_providers_with_resource(
-                context, rc_id, amount, tree_root_id=self.tree_root_id)
+                context, rc_id, amount, tree_root_uuid=self.tree_root_uuid)
             if not provs_with_resource:
                 raise exception.ResourceProviderNotFound()
             self._rps_with_resource[rc_id] = provs_with_resource
@@ -127,17 +143,17 @@ class RequestGroupSearchContext(object):
         # NOTE: This could be refactored to see the requested resources
         return self.has_trees
 
-    def get_rps_with_shared_capacity(self, rc_id):
-        sharing_in_aggs = self._sharing_providers
+    def get_rps_with_shared_capacity(self, rc_name):
+        sharing_in_aggs = set(self._sharing_providers)
         if self.rps_in_aggs:
             sharing_in_aggs &= self.rps_in_aggs
         if not sharing_in_aggs:
             return set()
-        rps_with_resource = set(p[0] for p in self._rps_with_resource[rc_id])
+        rps_with_resource = set(p[0] for p in self._rps_with_resource[rc_name])
         return sharing_in_aggs & rps_with_resource
 
-    def get_rps_with_resource(self, rc_id):
-        return self._rps_with_resource.get(rc_id)
+    def get_rps_with_resource(self, rc_name):
+        return self._rps_with_resourcerp.get(rc_name)
 
 
 def provider_uuids_from_rp_uuids(ctx, rp_uuids):
@@ -150,7 +166,7 @@ def provider_uuids_from_rp_uuids(ctx, rp_uuids):
     """
     query = """
         MATCH (rp:RESOURCE_PROVIDER)
-        WHERE rp.uuid IN %s
+        WHERE rp.uuid IN {rp_uuids}
         WITH rp
         OPTIONAL MATCH (parent:RESOURCE_PROVIDER)-[:CONTAINS*1]->(rp)
         WITH rp, parent
@@ -159,9 +175,9 @@ def provider_uuids_from_rp_uuids(ctx, rp_uuids):
              coalesce(root.uuid, rp.uuid) AS root_uuid
         ORDER BY uuid, parent_uuid, root_uuid
         RETURN uuid, parent_uuid, root_uuid
-    """ % rp_uuids
+    """.format(rp_uuids=util.makelist(rp_uuids))
     result = ctx.tx.run(query).data()
-    return {rec["uuid"]: res_ctx.ProviderIds(**rec) for rec in result}
+    return {rec["uuid"]: ProviderIds(**rec) for rec in result}
 
 
 def provider_uuids_from_uuid(ctx, uuid):
@@ -175,6 +191,36 @@ def provider_uuids_from_uuid(ctx, uuid):
     :param uuid: The UUID of the provider to look up
     """
     return provider_uuids_from_rp_uuids(ctx, [uuid]).get(uuid)
+
+
+@db_api.placement_context_manager.reader
+def validate_resources(ctx, rc_names):
+    """Ensure that all the resource classes requested are valid."""
+    query = """
+            MATCH (rc:RESOURCE_CLASS)
+            RETURN DISTINCT rc.name AS rc_name
+    """
+    result = ctx.tx.run(query).data()
+    valid_names = set([rec["rc_name"] for rec in result])
+    invalid_rc_names = set(rc_names) - valid_names
+    if invalid_rc_names:
+        resource_class = ",".join(invalid_rc_names)
+        raise exception.ResourceClassNotFound(resource_class)
+
+
+@db_api.placement_context_manager.reader
+def validate_traits(ctx, traits):
+    """Ensure that all the traits requested are valid."""
+    query = """
+            MATCH (t:TRAIT)
+            RETURN DISTINCT t.name AS trait
+    """
+    result = ctx.tx.run(query).data()
+    valid_names = set([rec["trait"] for rec in result])
+    invalid_names = set(traits) - valid_names
+    if invalid_names:
+        trait_names = ",".join(invalid_names)
+        raise exception.TraitNotFound(trait_names)
 
 
 @db_api.placement_context_manager.reader
@@ -234,12 +280,11 @@ def get_provider_uuids_matching(rg_ctx):
     """
     # The iteratively filtered set of resource provider internal IDs that match
     # all the constraints in the request
-    # NOTE(edleafe): the returned forbidden_rp_uuids is redundant, as
-    # `filtered_rps` has already had those forbidden traits/aggs removed. Since
-    # the rest of this method can only reduce the content of `filtered_rps`, we
-    # don't need to re-filter against the forbidden values.
     filtered_rps, forbidden_rp_uuids = get_provider_ids_for_traits_and_aggs(
             rg_ctx)
+    # 'filtered_rps' will be None if there were traits or aggs in the request,
+    # but no RPs matched those requirements. It will be an empty set if there
+    # was no filtering done because no traits or aggs were specified.
     if filtered_rps is None:
         # If no providers match the traits/aggs, we can short out
         return []
@@ -258,26 +303,35 @@ def get_provider_uuids_matching(rg_ctx):
     # as many records inside the loop below to remove providers from the
     # eventual results list
     provs_with_resource = set()
-    for rc_name, amount in rg_ctx.resources.items():
-        provs_with_resource = get_providers_with_resource(ctx, rc_name, amount,
-                tree_root_uuid=tree_root_uuid)
-        LOG.debug("found %d providers with available %d %s",
-                  len(provs_with_resource), amount, rc_name)
-        if not provs_with_resource:
-            return []
-
-        rc_rp_uuids = set(p[0] for p in provs_with_resource)
-        # The branching below could be collapsed code-wise, but is in place to
-        # make the debug logging clearer.
-        if filtered_rps:
-            filtered_rps &= rc_rp_uuids
-        else:
-            filtered_rps = rc_rp_uuids
-        LOG.debug("found %d providers after filtering by previous result",
-                len(filtered_rps))
-        if not filtered_rps:
-            return []
-    return [prov for prov in provs_with_resource if prov[0] in filtered_rps]
+    parts = []
+    for num, (rc_name, amount) in enumerate(rg_ctx.resources.items()):
+        parts.append( QUERY_TEMPLATE.format(num=num, rc_name=rc_name,
+                amount=amount))
+    query = "\nUNION\n".join(parts)
+    result = rg_ctx.tx.run(query).data()
+    # There will be a record for each (rp, root) that satisfies each requested
+    # resource. Only keep those where the root appears for all the resources.
+    provs_with_resource = set([(rec["rp_uuid"], rec["root_uuid"]) for rec in result])
+#        provs_with_resource = get_providers_with_resource(rg_ctx, rc_name,
+#                amount, tree_root_uuid=rg_ctx.tree_root_uuid)
+#        LOG.debug("found %d providers with available %d %s",
+#                  len(provs_with_resource), amount, rc_name)
+#        if not provs_with_resource:
+#            return []
+#
+#        rc_rp_uuids = set(p[0] for p in provs_with_resource)
+#        # The branching below could be collapsed code-wise, but is in place to
+#        # make the debug logging clearer.
+#        if filtered_rps:
+#            filtered_rps &= rc_rp_uuids
+#        else:
+#            filtered_rps = rc_rp_uuids
+#        LOG.debug("found %d providers after filtering by previous result",
+#                len(filtered_rps))
+#        if not filtered_rps:
+#            return []
+    return [prov for prov in provs_with_resource
+            if prov[0] not in forbidden_rp_uuids]
 
 
 @db_api.placement_context_manager.reader
@@ -344,7 +398,7 @@ def get_trees_matching_all(rg_ctx):
             # then we can short-circuit returning an empty RPCandidateList
             return rp_candidates.RPCandidateList()
 
-        sharing_providers = sharing.get(rc_name)
+        sharing_providers = rg_ctx.get_rps_with_shared_capacity(rc_name)
         if sharing_providers and rg_ctx.tree_root_uuid is None:
             # There are sharing providers for this resource class, so we
             # should also get combinations of (sharing provider, anchor root)
@@ -368,18 +422,18 @@ def get_trees_matching_all(rg_ctx):
             LOG.debug("found %d providers under %d trees after applying "
                       "aggregate filter %s",
                       len(provs_with_inv_rc.rps), len(provs_with_inv_rc.trees),
-                      member_of)
+                      rg_ctx.member_of)
             if not provs_with_inv_rc:
                 # Short-circuit returning an empty RPCandidateList
                 return rp_candidates.RPCandidateList()
-        if forbidden_aggs:
+        if rg_ctx.forbidden_aggs:
             # Aggregate on root spans the whole tree, so the rp itself
             # *and its root* should be outside the aggregate
             provs_with_inv_rc.filter_by_rp_nor_tree(rps_bad_aggs)
             LOG.debug("found %d providers under %d trees after applying "
                       "negative aggregate filter %s",
                       len(provs_with_inv_rc.rps), len(provs_with_inv_rc.trees),
-                      forbidden_aggs)
+                      rg_ctx.forbidden_aggs)
             if not provs_with_inv_rc:
                 # Short-circuit returning an empty RPCandidateList
                 return rp_candidates.RPCandidateList()
@@ -397,7 +451,7 @@ def get_trees_matching_all(rg_ctx):
             return rp_candidates.RPCandidateList()
 
     if (not rg_ctx.required_traits and not rg_ctx.forbidden_traits) or (
-            any(sharing.values())):
+            any(rg_ctx._sharing_providers)):
         # If there were no traits required, there's no difference in how we
         # calculate allocation requests between nested and non-nested
         # environments, so just short-circuit and return. Or if sharing
@@ -449,16 +503,16 @@ def _get_trees_with_traits(ctx, rp_uuids, required_traits, forbidden_traits):
             WHERE rp.uuid IN {rp_uuids}
             {trait_clause}
             WITH rp
-            MATCH p=()-[]->(root:RESOURCE_PROVIDER)-->(rp)
+            MATCH p=()-[*0]->(root:RESOURCE_PROVIDER)-[:CONTAINS*0..99]->(rp)
             WITH p, relationships(p) AS relp, root, rp
             WITH p, relp, size(relp) AS numrel, root, rp
             WITH rp, root, numrel, max(numrel) AS maxrel
             WHERE numrel = maxrel
-            ORDER BY rp, root
-            RETURN rp, root
-    """
+            RETURN rp.uuid AS rp_uuid, root.uuid AS root_uuid
+            ORDER BY rp_uuid, root_uuid
+    """.format(rp_uuids=util.makelist(rp_uuids), trait_clause=trait_clause)
     result = ctx.tx.run(query).data()
-    return ((rec["rp"], rec["root"]) for rec in result)
+    return [(rec["rp_uuid"], rec["root_uuid"]) for rec in result]
 
 
 @db_api.placement_context_manager.reader
@@ -489,7 +543,7 @@ def provider_ids_matching_aggregates(ctx, member_of, rp_uuids=None):
     agg_lines = []
     for num, agg_list in enumerate(member_of):
         agg_lines.append("MATCH (rp)-[:ASSOCIATED]->(agg%s:AGGREGATE)" % num)
-        agg_lines.append("WHERE agg%s.uuid IN %s" % (num, agg_list))
+        agg_lines.append("WHERE agg%s.uuid IN %s" % (num, util.makelist(agg_list)))
     agg_clause = "\n".join(agg_lines)
     query = """
             MATCH (rp:RESOURCE_PROVIDER)
@@ -526,10 +580,10 @@ def get_provider_ids_having_any_trait(ctx, traits):
                    must have associated with it.
     :raise ValueError: If traits is empty or None.
     """
-    return _filter_rps_by_traits(res_ctx, "any")
+    return _filter_rps_by_traits(ctx, traits, "any")
 
 
-def _get_provider_ids_having_all_traits(ctx):
+def _get_provider_ids_having_all_traits(ctx, traits):
     """Returns a set of resource provider internal IDs that have ALL of the
     required traits.
 
@@ -539,7 +593,7 @@ def _get_provider_ids_having_all_traits(ctx):
     :param traits: A list of trait names, all of which each provider must have
                    associated with it.
     """
-    return _filter_rps_by_traits(ctx, "all")
+    return _filter_rps_by_traits(ctx, traits, "all")
 
 
 def get_provider_ids_for_traits_and_aggs(res_ctx):
@@ -566,7 +620,7 @@ def get_provider_ids_for_traits_and_aggs(res_ctx):
 
     # If 'member_of' has values, do a separate lookup to identify the
     # resource providers that meet the member_of constraints.
-    if member_of:
+    if res_ctx.member_of:
         rps_in_aggs = provider_ids_matching_aggregates(res_ctx,
                 res_ctx.member_of)
         if filtered_rps:
@@ -663,9 +717,9 @@ def anchors_for_sharing_providers(ctx, rp_uuids):
     query = """
             MATCH (anchor:RESOURCE_PROVIDER)-[*0..99]->()-[:ASSOCIATED]->
                 (shared:RESOURCE_PROVIDER)
-            WHERE shared.uuid in %s
+            WHERE shared.uuid IN {rp_uuids}
             RETURN shared.uuid as s_uuid, anchor.uuid AS a_uuid 
-    """ % rp_uuids
+    """.format(rp_uuids=util.makelist(rp_uuids))
     result = ctx.tx.run(query).data()
     return set((rec["s_uuid"], rec["a_uuid"]) for rec in result)
 

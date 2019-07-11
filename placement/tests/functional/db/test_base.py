@@ -23,6 +23,7 @@ from placement.objects import allocation as alloc_obj
 from placement.objects import consumer as consumer_obj
 from placement.objects import inventory as inv_obj
 from placement.objects import project as project_obj
+from placement.objects import research_context as res_ctx
 from placement.objects import resource_provider as rp_obj
 from placement.objects import trait as trait_obj
 from placement.objects import user as user_obj
@@ -70,7 +71,7 @@ def set_sharing_among_agg(rp):
     agg_uuids = rp.get_aggregates()
     if not agg_uuids:
         return
-    providers = rp_obj.provider_ids_matching_aggregates(rp._context,
+    providers = res_ctx.provider_ids_matching_aggregates(rp._context,
             [agg_uuids])
     if not providers:
         return
@@ -106,9 +107,11 @@ def ensure_consumer(ctx, user, project, consumer_uuid=None):
     try:
         consumer = consumer_obj.Consumer.get_by_uuid(ctx, consumer_uuid)
     except exception.NotFound:
-        consumer = consumer_obj.Consumer(
-            ctx, uuid=consumer_uuid, user=user, project=project)
+        consumer = consumer_obj.Consumer(ctx, uuid=consumer_uuid, user=user,
+                project=project)
         consumer.create()
+    consumer_obj.relate_project_and_user(ctx, project.uuid, user.uuid,
+            consumer_uuid)
     return consumer
 
 

@@ -82,7 +82,7 @@ def _get_inventory_by_provider_uuid(ctx, rp_uuid):
             MATCH (rp:RESOURCE_PROVIDER {uuid: '%s'})-[:PROVIDES]->(rc)
             RETURN labels(rc)[0] as name, rc
     """ % rp_uuid
-    result = ctx.transaction.run(query).data()
+    result = ctx.tx.run(query).data()
     inv_props = ("name", "total", "reserved", "min_unit", "max_unit",
             "step_size", "allocation_ratio", "updated_at", "created_at")
     ret = []

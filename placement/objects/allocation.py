@@ -212,19 +212,27 @@ def _get_allocations_by_provider_uuid(context, rp_uuid):
             MATCH p=(cs:CONSUMER)-[:USES]->(rc)
             WITH rp, rc, labels(rc)[0] AS rc_name, cs,
                 relationships(p)[0] AS usages
-            MATCH (pj:PROJECT)-[:OWNS]->(user:USER)-[:OWNS]->(cs)
+            OPTIONAL MATCH (pj:PROJECT)-[:OWNS]->(user:USER)-[:OWNS]->(cs)
             RETURN rp, rc, rc_name, cs, usages, pj, user
     """ % rp_uuid
     result = context.tx.run(query).data()
     allocs = []
     for record in result:
+        rec_cs = db.pythonize(record["cs"])
+        pj_uuid = record["pj"].get("uuid") if record["pj"] else None
+        user_uuid = record["user"].get("uuid") if record["user"] else None
         allocs.append({
+            "resource_provider_name": record["rp"]["name"],
+            "resource_provider_uuid": record["rp"]["uuid"],
+            "resource_provider_generation": record["rp"]["generation"],
             "resource_class_name": record["rc_name"],
             "used": record["usages"]["amount"],
-            "consumer_uuid": record["cs"]["uuid"],
-            "consumer_generation": record["cs"]["generation"],
-            "project_uuid": record["pj"]["uuid"],
-            "user_uuid": record["user"]["uuid"],
+            "consumer_uuid": rec_cs["uuid"],
+            "consumer_generation": rec_cs["generation"],
+            "project_uuid": pj_uuid,
+            "user_uuid": user_uuid,
+            "created_at": rec_cs["created_at"],
+            "updated_at": rec_cs["updated_at"],
         })
     return allocs
 
@@ -243,6 +251,7 @@ def _get_allocations_by_consumer_uuid(context, consumer_uuid):
     result = context.tx.run(query).data()
     allocs = []
     for record in result:
+        rec_cs = db.pythonize(record["cs"])
         pj_uuid = record["pj"].get("uuid") if record["pj"] else None
         user_uuid = record["user"].get("uuid") if record["user"] else None
         allocs.append({
@@ -251,10 +260,12 @@ def _get_allocations_by_consumer_uuid(context, consumer_uuid):
             "resource_provider_generation": record["rp"]["generation"],
             "resource_class_name": record["rc_name"],
             "used": record["usages"]["amount"],
-            "consumer_uuid": record["cs"]["uuid"],
-            "consumer_generation": record["cs"]["generation"],
+            "consumer_uuid": rec_cs["uuid"],
+            "consumer_generation": rec_cs["generation"],
             "project_uuid": pj_uuid,
             "user_uuid": user_uuid,
+            "created_at": rec_cs["created_at"],
+            "updated_at": rec_cs["updated_at"],
         })
     return allocs
 
@@ -390,12 +401,12 @@ def get_all_by_resource_provider(context, rp):
         consumer = consumer_obj.Consumer(
                 context, uuid=rec["consumer_uuid"],
                 generation=rec["consumer_generation"],
-                project=project_obj.Project(uuid=rec["project_uuid"]),
+                project=project_obj.Project(context, uuid=rec["project_uuid"]),
                 user=user_obj.User(context, uuid=rec["user_uuid"]))
         objs.append(
             Allocation(
                 resource_provider=rp,
-                resource_class=rec["rc_name"],
+                resource_class=rec["resource_class_name"],
                 consumer=consumer,
                 used=rec["used"],
                 created_at=rec["created_at"],

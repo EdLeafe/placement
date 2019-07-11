@@ -185,7 +185,7 @@ def get_all_by_resource_provider(context, rp):
     associated with the supplied resource provider.
     """
     db_traits = get_traits_by_provider_uuid(context, rp.uuid)
-    return [Trait(context, **data) for data in db_traits]
+    return [Trait(context, name=trait) for trait in db_traits]
 
 
 @db_api.placement_context_manager.reader
@@ -234,7 +234,7 @@ def get_traits_by_provider_tree(context, root_uuids):
         if result:
             root_rp = db.pythonize(result[0]["root"])
             root_props = root_rp.keys()
-            root_traits = _traits_from_props(ctx, root_props)
+            root_traits = _traits_from_props(context, root_props)
             all_traits[root_uuid].update(root_traits)
         for rec in result:
             rp_node = rec["rp"]
@@ -242,7 +242,7 @@ def get_traits_by_provider_tree(context, root_uuids):
                 continue
             rp = db.pythonize(rp_node)
             rp_props = rp.keys()
-            rp_traits = _traits_from_props(ctx, rp_props)
+            rp_traits = _traits_from_props(context, rp_props)
             all_traits[rp.uuid].update(rp_traits)
     # Convert the sets back to lists
     all_traits = {k: list(v) for k, v in all_traits.items()}
@@ -266,19 +266,20 @@ def _get_all_from_db(context, filters):
         name_list = [six.text_type(n) for n in filters['name_in']]
         name_where = "WHERE trait.name IN %s" % name_list
     if 'prefix' in filters:
-        prefix_where = "trait.name STARTS WITH %s" % prefix
+        prefix_where = "trait.name STARTS WITH '{prf}'".format(prf=filters["prefix"])
         if name_where:
             name_where += "AND %s" % prefix_where
         else:
             name_where = "WHERE %s" % prefix_where
     if 'associated' in filters:
-        # This will be either True or False
+        # This means that only traits associated with RPs will be returned; the
+        # value will be either True or False.
+        add_not = " " if filters["associated"] else "not "
         assoc = """
                 WITH trait
                 MATCH (rp)
-                WHERE %s exists(rp.%s)
-        """
-        add_not = "" if filters["associated"] else "not"
+                WHERE {add_not}trait.name IN keys(rp)
+        """.format(add_not=add_not)
     query = """
             MATCH (trait:TRAIT)
             %(name_where)s
